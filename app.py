@@ -65,6 +65,42 @@ def team_key(name):
     return ALIASES.get(s, s)
 
 
+# ---- Liqa axtarışı: ölkə adları (ingiliscə, qısaltma və azərbaycanca) ----
+COUNTRY_WORDS = {
+    'england': 'eng ingiltere ingilis', 'eng': 'england ingiltere ingilis', 'scotland': 'sco sotlandiya', 'sco': 'scotland sotlandiya',
+    'wales': 'uels', 'germany': 'ger almaniya', 'ger': 'germany almaniya', 'italy': 'ita italiya', 'ita': 'italy italiya',
+    'spain': 'esp ispaniya', 'esp': 'spain ispaniya', 'france': 'fra fransa', 'fra': 'france fransa',
+    'netherlands': 'ned holland niderland', 'ned': 'netherlands holland niderland', 'holland': 'niderland',
+    'belgium': 'bel belcika', 'bel': 'belgium belcika', 'portugal': 'por portuqaliya', 'por': 'portugal portuqaliya',
+    'turkey': 'tur turkiye', 'tur': 'turkey turkiye', 'greece': 'gre yunanistan', 'gre': 'greece yunanistan',
+    'finland': 'fin finlandiya', 'fin': 'finland finlandiya', 'russia': 'rus rusiya', 'rus': 'russia rusiya',
+    'ukraine': 'ukr ukrayna', 'ukr': 'ukraine ukrayna', 'azerbaijan': 'aze azerbaycan', 'aze': 'azerbaijan azerbaycan',
+    'brazil': 'bra braziliya', 'bra': 'brazil braziliya', 'argentina': 'arg', 'arg': 'argentina',
+    'usa': 'abs amerika mls', 'mls': 'usa abs amerika', 'japan': 'jpn yaponiya', 'jpn': 'japan yaponiya',
+    'china': 'chn cin', 'chn': 'china cin', 'mexico': 'mex meksika', 'mex': 'mexico meksika',
+    'sweden': 'swe isvec', 'swe': 'sweden isvec', 'norway': 'nor norvec', 'nor': 'norway norvec',
+    'denmark': 'den danimarka', 'den': 'denmark danimarka', 'austria': 'aut avstriya', 'aut': 'austria avstriya',
+    'switzerland': 'sui isvecre', 'sui': 'switzerland isvecre', 'ireland': 'irl irlandiya', 'irl': 'ireland irlandiya',
+    'poland': 'pol polsa', 'pol': 'poland polsa', 'romania': 'rou ruminiya', 'rou': 'romania ruminiya',
+    'champions league': 'uefa cempionlar liqasi', 'europa league': 'uefa avropa liqasi',
+    'conference league': 'uefa konfrans liqasi', 'cup': 'kubok', 'pokal': 'kubok cup', 'copa': 'kubok cup',
+    'premier': 'premyer', 'division': 'divizion', 'liga': 'liqa', 'ligue': 'liqa',
+}
+
+
+def norm_search(text):
+    t = str(text).lower()
+    for a, b in {'ə': 'e', 'ı': 'i', 'ö': 'o', 'ü': 'u', 'ş': 's', 'ç': 'c', 'ğ': 'g'}.items():
+        t = t.replace(a, b)
+    return unicodedata.normalize('NFKD', t).encode('ascii', 'ignore').decode()
+
+
+def league_search_blob(name):
+    base = norm_search(name)
+    extra = [w for key, w in COUNTRY_WORDS.items() if re.search(r'\b' + re.escape(key) + r'\b', base)]
+    return base + ' ' + ' '.join(extra)
+
+
 st.set_page_config(page_title='Futbol Filtri v6', page_icon='⚽', layout='wide')
 
 CSS = """
@@ -417,20 +453,27 @@ with st.container(border=True):
     st.session_state['lg_known'] = set(league_options)
     st.session_state.setdefault('lg_ver', 0)
     with st.expander(f'🏆 Liqalar — {len(league_options)} liqa var (açıb seç)', expanded=False):
-        b1, b2, _ = st.columns([1, 1, 3])
-        if b1.button('✅ Hamısını seç', use_container_width=True):
-            st.session_state['lg_sel'] = set(league_options)
+        lg_query = st.text_input('🔍 Liqa və ya ölkə axtar', placeholder='məs: almaniya, england, fin, champions, kubok ...', key='lg_query')
+        q_tokens = norm_search(lg_query).split()
+        visible = [l for l in league_options if all(t in league_search_blob(l) for t in q_tokens)]
+        b1, b2, _ = st.columns([1.2, 1.2, 2.6])
+        if b1.button('✅ Göstərilənləri seç' if q_tokens else '✅ Hamısını seç', use_container_width=True):
+            st.session_state['lg_sel'] = st.session_state['lg_sel'] | set(visible)
             st.session_state['lg_ver'] += 1
-        if b2.button('⬜ Təmizlə', use_container_width=True):
-            st.session_state['lg_sel'] = set()
+        if b2.button('⬜ Göstərilənləri təmizlə' if q_tokens else '⬜ Təmizlə', use_container_width=True):
+            st.session_state['lg_sel'] = st.session_state['lg_sel'] - set(visible)
             st.session_state['lg_ver'] += 1
-        lg_df = pd.DataFrame({'Seç': [l in st.session_state['lg_sel'] for l in league_options], 'Liqa': league_options})
-        lg_edit = st.data_editor(
-            lg_df, hide_index=True, disabled=['Liqa'], height=340, use_container_width=True,
-            column_config={'Seç': st.column_config.CheckboxColumn('Seç', width='small'),
-                           'Liqa': st.column_config.TextColumn('Liqa', width='large')},
-            key=f"lg_editor_{st.session_state['lg_ver']}")
-        st.session_state['lg_sel'] = set(lg_edit.loc[lg_edit['Seç'], 'Liqa'])
+        if visible:
+            lg_df = pd.DataFrame({'Seç': [l in st.session_state['lg_sel'] for l in visible], 'Liqa': visible})
+            lg_edit = st.data_editor(
+                lg_df, hide_index=True, disabled=['Liqa'], height=340, use_container_width=True,
+                column_config={'Seç': st.column_config.CheckboxColumn('Seç', width='small'),
+                               'Liqa': st.column_config.TextColumn('Liqa', width='large')},
+                key=f"lg_editor_{st.session_state['lg_ver']}_{norm_search(lg_query).strip()}")
+            chosen = set(lg_edit.loc[lg_edit['Seç'], 'Liqa'])
+            st.session_state['lg_sel'] = (st.session_state['lg_sel'] - set(visible)) | chosen
+        else:
+            st.info('Belə liqa tapılmadı. Başqa söz yaz (məs: ölkə adı).')
     sel_leagues = st.session_state['lg_sel']
     st.caption(f'Seçilmiş liqa: {len(sel_leagues)} / {len(league_options)}')
 
