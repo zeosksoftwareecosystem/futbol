@@ -452,24 +452,48 @@ with st.container(border=True):
     st.session_state['lg_sel'] = (st.session_state['lg_sel'] & set(league_options)) | (set(league_options) - known)
     st.session_state['lg_known'] = set(league_options)
     st.session_state.setdefault('lg_ver', 0)
-    with st.expander(f'🏆 Liqalar — {len(league_options)} liqa var (açıb seç)', expanded=False):
+    # Seçilmiş tarix aralığında hansı liqalarda neçə oyun var (analizdəki məntiqlə eyni: keçmiş — nəticələr, bu gün və sonrası — cədvəl)
+    d_from, d_to, d_today = pd.Timestamp(date_from), pd.Timestamp(date_to), pd.Timestamp(today)
+
+    def _games_in_range(df, past):
+        if df.empty:
+            return df
+        d = df['date'].dt.normalize()
+        keep = (d >= d_from) & (d <= d_to) & ((d < d_today) if past else (d >= d_today))
+        return df[keep]
+
+    _rng = pd.concat([_games_in_range(results, True), _games_in_range(fixtures, False)], ignore_index=True)
+    games_per_league = _rng.drop_duplicates(subset=['date', 'home_k', 'away_k'])['league'].value_counts().to_dict() if not _rng.empty else {}
+    leagues_with_games = [l for l in league_options if games_per_league.get(l, 0) > 0]
+
+    with st.expander(f'🏆 Liqalar — {len(league_options)} liqa var · seçilmiş tarixdə oyunu olan: {len(leagues_with_games)} (açıb seç)', expanded=False):
         lg_query = st.text_input('🔍 Liqa və ya ölkə axtar', placeholder='məs: almaniya, england, fin, champions, kubok ...', key='lg_query')
         q_tokens = norm_search(lg_query).split()
         visible = [l for l in league_options if all(t in league_search_blob(l) for t in q_tokens)]
-        b1, b2, _ = st.columns([1.2, 1.2, 2.6])
+        # oyunu olan liqalar yuxarıda (oyun sayına görə), qalanlar əlifba ilə
+        visible.sort(key=lambda l: (-games_per_league.get(l, 0), l))
+        b1, b2, b3 = st.columns(3)
         if b1.button('✅ Göstərilənləri seç' if q_tokens else '✅ Hamısını seç', use_container_width=True):
             st.session_state['lg_sel'] = st.session_state['lg_sel'] | set(visible)
             st.session_state['lg_ver'] += 1
         if b2.button('⬜ Göstərilənləri təmizlə' if q_tokens else '⬜ Təmizlə', use_container_width=True):
             st.session_state['lg_sel'] = st.session_state['lg_sel'] - set(visible)
             st.session_state['lg_ver'] += 1
+        if b3.button('🎯 Yalnız oyunu olanları seç', use_container_width=True):
+            st.session_state['lg_sel'] = (st.session_state['lg_sel'] - set(visible)) | {l for l in visible if games_per_league.get(l, 0) > 0}
+            st.session_state['lg_ver'] += 1
         if visible:
-            lg_df = pd.DataFrame({'Seç': [l in st.session_state['lg_sel'] for l in visible], 'Liqa': visible})
+            lg_df = pd.DataFrame({
+                'Seç': [l in st.session_state['lg_sel'] for l in visible],
+                'Liqa': visible,
+                'Oyun': [int(games_per_league.get(l, 0)) for l in visible],
+            })
             lg_edit = st.data_editor(
-                lg_df, hide_index=True, disabled=['Liqa'], height=340, use_container_width=True,
+                lg_df, hide_index=True, disabled=['Liqa', 'Oyun'], height=340, use_container_width=True,
                 column_config={'Seç': st.column_config.CheckboxColumn('Seç', width='small'),
-                               'Liqa': st.column_config.TextColumn('Liqa', width='large')},
-                key=f"lg_editor_{st.session_state['lg_ver']}_{norm_search(lg_query).strip()}")
+                               'Liqa': st.column_config.TextColumn('Liqa', width='large'),
+                               'Oyun': st.column_config.NumberColumn('Oyun sayı', width='small', help='Seçilmiş tarix aralığındakı oyun sayı')},
+                key=f"lg_editor_{st.session_state['lg_ver']}_{norm_search(lg_query).strip()}_{date_from}_{date_to}")
             chosen = set(lg_edit.loc[lg_edit['Seç'], 'Liqa'])
             st.session_state['lg_sel'] = (st.session_state['lg_sel'] - set(visible)) | chosen
         else:
