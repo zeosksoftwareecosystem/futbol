@@ -1,6 +1,7 @@
 from pathlib import Path
 import zipfile, io, re, unicodedata, requests, shutil, tempfile
 from datetime import datetime
+from collections import Counter
 import pandas as pd
 import streamlit as st
 
@@ -183,9 +184,79 @@ def add_keys(df, src):
     return df
 
 
+def _tokens_match(short, long_):
+    used = set()
+    for t in short:
+        hit = next((j for j, u in enumerate(long_) if j not in used and (u == t or (len(t) >= 3 and u.startswith(t)))), None)
+        if hit is None:
+            return False
+        used.add(hit)
+    return True
+
+
+def names_compatible(a, b):
+    """'cheltenham' ~ 'cheltenham town', 'man city' ~ 'manchester city' kimi adları uyğun sayır."""
+    if a == b:
+        return True
+    ta, tb = a.split(), b.split()
+    if not ta or not tb:
+        return False
+    if len(ta) > len(tb):
+        ta, tb = tb, ta
+    return _tokens_match(ta, tb)
+
+
+def learn_key_map(fd, om):
+    """Eyni gün oynanan və hər iki komandası uyğun gələn oyunlardan football-data adlarını Open Matchday adlarına çevirən xəritə öyrənir."""
+    if fd.empty or om.empty:
+        return {}
+    m = fd[['date', 'home_k', 'away_k']].dropna().drop_duplicates().merge(
+        om[['date', 'home_k', 'away_k']].dropna().drop_duplicates(), on='date', suffixes=('', '_om'))
+    votes = Counter()
+    for h, a, ho, ao in zip(m['home_k'], m['away_k'], m['home_k_om'], m['away_k_om']):
+        if h == ho and a == ao:
+            continue
+        if names_compatible(h, ho) and names_compatible(a, ao):
+            if h != ho:
+                votes[(h, ho)] += 1
+            if a != ao:
+                votes[(a, ao)] += 1
+    best = {}
+    for (k, target), n in votes.items():
+        if k not in best or n > best[k][1]:
+            best[k] = (target, n)
+    return {k: v[0] for k, v in best.items()}
+
+
+def apply_key_map(df, kmap):
+    if df.empty or not kmap:
+        return df
+    df = df.copy()
+    df['home_k'] = df['home_k'].map(lambda k: kmap.get(k, k))
+    df['away_k'] = df['away_k'].map(lambda k: kmap.get(k, k))
+    return df
+
+
+def learn_league_map(fd, om):
+    """Eyni oyunun iki mənbədəki liqa adlarını müqayisə edib Open Matchday liqa adını football-data adına çevirir (təkrar liqa adları olmasın deyə)."""
+    if fd.empty or om.empty:
+        return {}
+    keys = ['date', 'home_k', 'away_k']
+    m = fd[keys + ['league']].merge(om[keys + ['league']], on=keys, suffixes=('_fd', '_om'))
+    if m.empty:
+        return {}
+    counts = m.groupby(['league_om', 'league_fd']).size().reset_index(name='n').sort_values('n', ascending=False)
+    return dict(counts.drop_duplicates('league_om').set_index('league_om')['league_fd'])
+
+
+def pretty_league(name):
+    t = str(name).replace('_', ' ').replace('-', ' ').strip()
+    return t.title() if t.islower() else t
+
+
 def merge_sources(fd, om):
-    """Eyni oyun (tarix + komanda) iki mənbədə varsa birləşdirir: statistika üçün əvvəlcə football-data.co.uk, boşluğu Open Matchday doldurur."""
-    fd, om = add_keys(fd, 'FD'), add_keys(om, 'OM')
+    """Eyni oyun (tarix + komanda) iki mənbədə varsa birləşdirir: statistika üçün əvvəlcə football-data.co.uk, boşluğu Open Matchday doldurur.
+    fd və om artıq add_keys + apply_key_map-dən keçmiş olmalıdır."""
     if fd.empty:
         return om, []
     if om.empty:
@@ -220,11 +291,24 @@ def load_data():
             fixtures.append(df)
         elif f.name.startswith('results_'):
             results.append(df)
-    om_fix = pd.concat(fixtures, ignore_index=True) if fixtures else pd.DataFrame()
-    om_res = pd.concat(results, ignore_index=True) if results else pd.DataFrame()
+    om_fix = add_keys(pd.concat(fixtures, ignore_index=True) if fixtures else pd.DataFrame(), 'OM')
+    om_res = add_keys(pd.concat(results, ignore_index=True) if results else pd.DataFrame(), 'OM')
     fd_fix, fd_res = load_fd()
+    fd_fix, fd_res = add_keys(fd_fix, 'FD'), add_keys(fd_res, 'FD')
+    fd_all = pd.concat([x for x in (fd_res, fd_fix) if not x.empty], ignore_index=True) if (not fd_res.empty or not fd_fix.empty) else pd.DataFrame()
+    om_all = pd.concat([x for x in (om_res, om_fix) if not x.empty], ignore_index=True) if (not om_res.empty or not om_fix.empty) else pd.DataFrame()
+    kmap = learn_key_map(fd_all, om_all)
+    fd_fix, fd_res = apply_key_map(fd_fix, kmap), apply_key_map(fd_res, kmap)
+    lmap = {**learn_league_map(fd_fix, om_fix), **learn_league_map(fd_res, om_res)}
+    if lmap:
+        for df_ in (om_fix, om_res):
+            if not df_.empty:
+                df_['league'] = df_['league'].map(lambda l: lmap.get(l, l))
     fix, fix_only = merge_sources(fd_fix, om_fix)
     res, res_only = merge_sources(fd_res, om_res)
+    for df_ in (fix, res):
+        if not df_.empty and 'league' in df_.columns:
+            df_['league'] = df_['league'].map(pretty_league)
     return fix, res, sorted(set(fix_only) | set(res_only))
 
 
@@ -325,6 +409,8 @@ with st.container(border=True):
         date_to = st.date_input('Son tarix', value=today)
     with c3:
         n_games = st.number_input('Hər komandanın son neçə oyunu?', min_value=1, max_value=50, value=2, step=1)
+    league_options = sorted({str(x) for x in pd.concat([fixtures['league'], results['league']]).dropna() if str(x).strip()})
+    sel_leagues = st.multiselect('Liqalar', league_options, placeholder='Bütün liqalar (seçmirsənsə hamısı yoxlanır)')
 
 with st.container(border=True):
     st.markdown('<div class="sec">2 · Filtrlər</div>', unsafe_allow_html=True)
@@ -407,6 +493,9 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
         (results['date'].dt.date <= date_to) &
         (results['date'].dt.date < today)
     ].copy()
+    if sel_leagues:
+        fixture_targets = fixture_targets[fixture_targets['league'].isin(sel_leagues)]
+        result_targets = result_targets[result_targets['league'].isin(sel_leagues)]
     for frame in (fixture_targets, result_targets):
         for col in target_cols:
             if col not in frame.columns:
