@@ -124,8 +124,16 @@ def match_pass(row):
     return all(checks) if checks else True
 
 def team_last(team, date, league):
-    hist=results[(results['league']==league) & (results['date'] < date) & ((results['home']==team)|(results['away']==team))].sort_values('date', ascending=False).head(n_games)
-    if len(hist)<n_games: return None
+    hist = results[
+        (results['date'] < date) &
+        ((results['home'] == team) | (results['away'] == team))
+    ].sort_values(
+        ['date', 'time'], ascending=[False, False]
+    ).head(n_games)
+
+    if len(hist) < n_games:
+        return None
+
     return hist
 
 if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=True):
