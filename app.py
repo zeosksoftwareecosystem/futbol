@@ -125,14 +125,21 @@ def match_pass(row):
 
 def team_last(team, date, league):
     hist = results[
-        (results['date'] < date) &
-        ((results['home'] == team) | (results['away'] == team))
+        (results["date"] < date) &
+        (
+            (results["home"] == team) |
+            (results["away"] == team)
+        )
     ].sort_values(
-        ['date', 'time'], ascending=[False, False]
+        "date",
+        ascending=False
     ).head(n_games)
 
     if len(hist) < n_games:
         return None
+
+    return hist
+
 
     return hist
 
