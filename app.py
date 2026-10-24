@@ -166,9 +166,28 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
     st.success(f'Yoxlanılan oyun: {len(day_games)} · Uyğun oyun: {len(passed)} · Tarixi çatmayan/az olan oyun: {skipped}')
     st.caption('Seçilmiş tarixdəki oyunlar həm qarşıdakı oyunlar, həm də artıq başa çatmış nəticələr cədvəlindən götürülür. Komandaların əvvəlki oyunları isə yalnız həmin oyunun tarixindən əvvəl axtarılır.')
     if passed:
-        out=pd.DataFrame(passed)
-        st.dataframe(out, use_container_width=True, hide_index=True)
-        st.download_button('Nəticələri CSV kimi yüklə', out.to_csv(index=False).encode('utf-8-sig'), file_name='futbol_filtri_neticeleri.csv', mime='text/csv')
+        out = pd.DataFrame(passed)
+        st.subheader('⚽ Uyğun oyunlar')
+        st.caption('Hər oyun ayrıca kartda göstərilir. Komandaların əvvəlki oyunları aşağı açılan hissələrdədir.')
+        for idx, item in enumerate(passed, start=1):
+            time_text = str(item.get('Saat', '')).strip()
+            if time_text.lower() in ('nan', 'nat', 'none', ''):
+                time_text = 'Saat məlum deyil'
+            league_text = str(item.get('Çempionat', ''))
+            league_text = league_text.replace('_', ' ').replace('-', ' ').strip()
+            st.markdown(
+                f'''<div style="border:1px solid #d8dee8;border-radius:12px;padding:14px 16px;margin:10px 0 4px 0;">
+                <div style="font-size:12px;color:#64748b;margin-bottom:6px;">{item['Tarix']} · {time_text} · {league_text}</div>
+                <div style="font-size:18px;font-weight:700;line-height:1.4;">{item['Ev sahibi']} <span style="color:#64748b;font-weight:400;">vs</span> {item['Qonaq']}</div>
+                <div style="font-size:12px;color:#64748b;margin-top:6px;">Hər komandanın son {item['Son oyun sayı']} oyunu yoxlanılıb</div>
+                </div>''',
+                unsafe_allow_html=True
+            )
+            with st.expander(f'📋 {item["Ev sahibi"]} — əvvəlki oyunlar'):
+                st.write(item['Ev sahibinin əvvəlki nəticələri'].replace(' | ', '\n'))
+            with st.expander(f'📋 {item["Qonaq"]} — əvvəlki oyunlar'):
+                st.write(item['Qonağın əvvəlki nəticələri'].replace(' | ', '\n'))
+        st.download_button('⬇️ Nəticələri CSV kimi yüklə', out.to_csv(index=False).encode('utf-8-sig'), file_name='futbol_filtri_neticeleri.csv', mime='text/csv')
     else:
         st.info('Seçilən şərtlərə uyğun oyun tapılmadı. Tarix aralığını genişləndir və ya filtrləri dəyiş.')
 
