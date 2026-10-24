@@ -410,7 +410,29 @@ with st.container(border=True):
     with c3:
         n_games = st.number_input('Hər komandanın son neçə oyunu?', min_value=1, max_value=50, value=2, step=1)
     league_options = sorted({str(x) for x in pd.concat([fixtures['league'], results['league']]).dropna() if str(x).strip()})
-    sel_leagues = st.multiselect('Liqalar', league_options, placeholder='Bütün liqalar (seçmirsənsə hamısı yoxlanır)')
+    # Liqa seçimi: cədvəldə hər liqanın qarşısında quş (checkbox). İlk dəfə hamısı seçilmiş olur.
+    known = st.session_state.get('lg_known', set())
+    st.session_state.setdefault('lg_sel', set())
+    st.session_state['lg_sel'] = (st.session_state['lg_sel'] & set(league_options)) | (set(league_options) - known)
+    st.session_state['lg_known'] = set(league_options)
+    st.session_state.setdefault('lg_ver', 0)
+    with st.expander(f'🏆 Liqalar — {len(league_options)} liqa var (açıb seç)', expanded=False):
+        b1, b2, _ = st.columns([1, 1, 3])
+        if b1.button('✅ Hamısını seç', use_container_width=True):
+            st.session_state['lg_sel'] = set(league_options)
+            st.session_state['lg_ver'] += 1
+        if b2.button('⬜ Təmizlə', use_container_width=True):
+            st.session_state['lg_sel'] = set()
+            st.session_state['lg_ver'] += 1
+        lg_df = pd.DataFrame({'Seç': [l in st.session_state['lg_sel'] for l in league_options], 'Liqa': league_options})
+        lg_edit = st.data_editor(
+            lg_df, hide_index=True, disabled=['Liqa'], height=340, use_container_width=True,
+            column_config={'Seç': st.column_config.CheckboxColumn('Seç', width='small'),
+                           'Liqa': st.column_config.TextColumn('Liqa', width='large')},
+            key=f"lg_editor_{st.session_state['lg_ver']}")
+        st.session_state['lg_sel'] = set(lg_edit.loc[lg_edit['Seç'], 'Liqa'])
+    sel_leagues = st.session_state['lg_sel']
+    st.caption(f'Seçilmiş liqa: {len(sel_leagues)} / {len(league_options)}')
 
 with st.container(border=True):
     st.markdown('<div class="sec">2 · Filtrlər</div>', unsafe_allow_html=True)
@@ -493,7 +515,10 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
         (results['date'].dt.date <= date_to) &
         (results['date'].dt.date < today)
     ].copy()
-    if sel_leagues:
+    if not sel_leagues:
+        st.warning('Heç bir liqa seçilməyib. "Liqalar" bölməsindən ən azı bir liqa seç.')
+        st.stop()
+    if len(sel_leagues) < len(league_options):
         fixture_targets = fixture_targets[fixture_targets['league'].isin(sel_leagues)]
         result_targets = result_targets[result_targets['league'].isin(sel_leagues)]
     for frame in (fixture_targets, result_targets):
@@ -600,7 +625,7 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
         st.info('Seçilən şərtlərə uyğun oyun tapılmadı. Tarix aralığını genişləndir və ya filtrləri dəyiş.')
 
 with st.expander('Məlumat bazası haqqında'):
-    st.write(f'Çempionat qovluqları: {len(list(DATA_DIR.iterdir())) if DATA_DIR.exists() else 0}. Qarşıdakı oyun sətri: {len(fixtures)}. Tarixi nəticə sətri: {len(results)}.')
+    st.write(f'Çempionat qovluqları: {len(list(DATA_DIR.iterdir())) if DATA_DIR.exists() else 0}. Qarşıdakı oyun sətri: {len(fixtures)}. Tarixi nəticə sətri: {len(results)}. Siyahıdakı liqa sayı: {len(league_options)}.')
     st.write('Mənbələr: Open Matchday — https://github.com/oladeeayo/open-matchday və football-data.co.uk. Eyni oyun iki mənbədə varsa statistika üçün əvvəlcə football-data.co.uk götürülür, çatışmayanı Open Matchday doldurur. Statistikası olmayan oyunlar müvafiq statistik filtrdə uyğun sayılmır.')
     if FD_DIR.exists() and any(FD_DIR.glob('*.csv')):
         st.write(f'football-data.co.uk faylları: {len(list(FD_DIR.glob("*.csv")))}.')
