@@ -135,18 +135,38 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
     if not criteria_selected:
         st.warning('Zəhmət olmasa ən azı bir filtr seç.')
         st.stop()
-    # Target matches must include both scheduled fixtures AND completed results.
-    # The source's fixtures CSV mostly contains upcoming games, so scanning fixtures
-    # alone silently misses matches on past dates.
-    fixture_targets = fixtures[(fixtures['date'].dt.date >= date_from) & (fixtures['date'].dt.date <= date_to)].copy()
-    result_targets = results[(results['date'].dt.date >= date_from) & (results['date'].dt.date <= date_to)].copy()
+    # Upcoming/current matches must come ONLY from fixtures.
+    # The results CSV may contain stale or historical rows stamped with today's
+    # date, so never use results as target matches for today or future dates.
+    # For fully past dates, use completed results as the target list.
+    today = pd.Timestamp.now().date()
     target_cols = ['date','time','home','away','league']
+
+    fixture_targets = fixtures[
+        (fixtures['date'].dt.date >= date_from) &
+        (fixtures['date'].dt.date <= date_to) &
+        (fixtures['date'].dt.date >= today)
+    ].copy()
+
+    result_targets = results[
+        (results['date'].dt.date >= date_from) &
+        (results['date'].dt.date <= date_to) &
+        (results['date'].dt.date < today)
+    ].copy()
+
     for frame in (fixture_targets, result_targets):
         for col in target_cols:
             if col not in frame.columns:
                 frame[col] = '' if col in ('time','league') else pd.NaT if col == 'date' else ''
-    day_games = pd.concat([fixture_targets[target_cols], result_targets[target_cols]], ignore_index=True)
-    day_games = day_games.dropna(subset=['date','home','away']).drop_duplicates(subset=['date','league','home','away']).copy()
+
+    day_games = pd.concat([result_targets[target_cols], fixture_targets[target_cols]], ignore_index=True)
+    day_games = day_games.dropna(subset=['date','home','away']).copy()
+    # Prefer fixture entries if a duplicate exists, and normalize duplicate keys.
+    day_games['_source_priority'] = day_games.apply(
+        lambda r: 1 if r['date'].date() >= today else 0, axis=1
+    )
+    day_games = day_games.sort_values('_source_priority', ascending=False)
+    day_games = day_games.drop_duplicates(subset=['date','league','home','away']).drop(columns=['_source_priority']).copy()
     if day_games.empty:
         st.warning('Bu tarix aralığında bazada oyun tapılmadı. Bu mənbə keçmiş tarixlər üçün əsasən nəticələr cədvəlindən istifadə edir; GitHub-dan yeniləməyi yoxla.')
         st.stop()
