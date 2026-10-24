@@ -159,8 +159,8 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
             skipped += 1; progress.progress((i+1)/len(day_games)); continue
         if all(match_pass(r) for _,r in hhist.iterrows()) and all(match_pass(r) for _,r in ahist.iterrows()):
             passed.append({'Tarix':date.strftime('%Y-%m-%d'),'Saat':str(game.get('time','')),'Çempionat':league,'Ev sahibi':home,'Qonaq':away,'Son oyun sayı':n_games,
-                           'Ev sahibinin əvvəlki nəticələri':' | '.join(f"{r['home']} {int(r['ft_home'])}-{int(r['ft_away'])} {r['away']}" for _,r in hhist.sort_values('date').iterrows()),
-                           'Qonağın əvvəlki nəticələri':' | '.join(f"{r['home']} {int(r['ft_home'])}-{int(r['ft_away'])} {r['away']}" for _,r in ahist.sort_values('date').iterrows())})
+                           'Ev sahibinin əvvəlki nəticələri': hhist.sort_values('date', ascending=False).to_dict('records'),
+                           'Qonağın əvvəlki nəticələri': ahist.sort_values('date', ascending=False).to_dict('records')})
         progress.progress((i+1)/len(day_games))
     progress.empty()
     st.success(f'Yoxlanılan oyun: {len(day_games)} · Uyğun oyun: {len(passed)} · Tarixi çatmayan/az olan oyun: {skipped}')
@@ -183,10 +183,37 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
                 </div>''',
                 unsafe_allow_html=True
             )
-            with st.expander(f'📋 {item["Ev sahibi"]} — əvvəlki oyunlar'):
-                st.write(item['Ev sahibinin əvvəlki nəticələri'].replace(' | ', '\n'))
-            with st.expander(f'📋 {item["Qonaq"]} — əvvəlki oyunlar'):
-                st.write(item['Qonağın əvvəlki nəticələri'].replace(' | ', '\n'))
+            # Keep previous games visible (not collapsed), with the date shown for every match.
+            for team_label, history_key in [
+                (item['Ev sahibi'], 'Ev sahibinin əvvəlki nəticələri'),
+                (item['Qonaq'], 'Qonağın əvvəlki nəticələri'),
+            ]:
+                st.markdown(
+                    f'<div style="font-weight:700;margin:10px 0 4px 0;">📋 {team_label} — əvvəlki {item["Son oyun sayı"]} oyun</div>',
+                    unsafe_allow_html=True
+                )
+                history = item[history_key]
+                for old_match in history:
+                    old_date = pd.to_datetime(old_match.get('date'), errors='coerce')
+                    date_text = old_date.strftime('%d.%m.%Y') if pd.notna(old_date) else 'Tarix məlum deyil'
+                    old_time = str(old_match.get('time', '')).strip()
+                    if old_time.lower() in ('nan', 'nat', 'none', ''):
+                        old_time = ''
+                    hg = old_match.get('ft_home')
+                    ag = old_match.get('ft_away')
+                    if pd.notna(hg) and pd.notna(ag):
+                        score = f'{int(hg)}–{int(ag)}'
+                    else:
+                        score = 'hesab yoxdur'
+                    old_home = str(old_match.get('home', ''))
+                    old_away = str(old_match.get('away', ''))
+                    st.markdown(
+                        f'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:8px 12px;margin:4px 0 6px 0;">'
+                        f'<span style="color:#64748b;font-size:12px;">{date_text}{(" · " + old_time) if old_time else ""}</span><br>'
+                        f'<span style="font-weight:500;">{old_home}</span> <b>{score}</b> <span style="font-weight:500;">{old_away}</span>'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
         st.download_button('⬇️ Nəticələri CSV kimi yüklə', out.to_csv(index=False).encode('utf-8-sig'), file_name='futbol_filtri_neticeleri.csv', mime='text/csv')
     else:
         st.info('Seçilən şərtlərə uyğun oyun tapılmadı. Tarix aralığını genişləndir və ya filtrləri dəyiş.')
