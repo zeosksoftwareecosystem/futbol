@@ -1,5 +1,5 @@
 from pathlib import Path
-import zipfile, io, re, unicodedata, requests, shutil, tempfile
+import zipfile, io, re, unicodedata, requests, shutil, tempfile, json
 from datetime import datetime
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -49,6 +49,66 @@ ESPN_LEAGUES = {
     'conmebol.sudamericana': 'Copa Sudamericana',
     'concacaf.champions': 'CONCACAF Champions Cup',
     'concacaf.leagues.cup': 'Leagues Cup',
+    # Avropa kubokları
+    'uefa.champions': 'UEFA Champions League',
+    'uefa.europa': 'UEFA Europa League',
+    'uefa.europa.conf': 'UEFA Conference League',
+    # Daxili kuboklar
+    'eng.fa': 'England FA Cup',
+    'eng.league_cup': 'England League Cup',
+    'esp.copa_del_rey': 'Spain Copa del Rey',
+    'ger.dfb_pokal': 'Germany DFB Pokal',
+    'ita.coppa_italia': 'Italy Coppa Italia',
+    'fra.coupe_de_france': 'France Coupe de France',
+    # Avropa liqaları (football-data.co.uk əsas siyahısında olmayanlar)
+    'aut.1': 'Austria Bundesliga', 'den.1': 'Denmark Superliga', 'swe.1': 'Sweden Allsvenskan',
+    'nor.1': 'Norway Eliteserien', 'sui.1': 'Switzerland Super League', 'rus.1': 'Russia Premier League',
+    'ukr.1': 'Ukraine Premier League', 'pol.1': 'Poland Ekstraklasa', 'cze.1': 'Czech First League',
+    'cro.1': 'Croatia HNL', 'srb.1': 'Serbia SuperLiga', 'rou.1': 'Romania Liga I',
+    'irl.1': 'Ireland Premier Division', 'fin.1': 'Finland Veikkausliiga', 'aze.1': 'Azerbaijan Premier League',
+    'isr.1': 'Israel Premier League',
+    # Amerika
+    'usa.1': 'USA MLS', 'mex.1': 'Mexico Liga MX', 'bra.1': 'Brazil Serie A', 'bra.2': 'Brazil Serie B',
+    'arg.1': 'Argentina Primera Division', 'col.1': 'Colombia Primera A', 'chi.1': 'Chile Primera Division',
+    'uru.1': 'Uruguay Primera Division', 'ecu.1': 'Ecuador Serie A', 'per.1': 'Peru Liga 1', 'par.1': 'Paraguay Primera Division',
+    # Asiya, Okeaniya, Afrika
+    'jpn.1': 'Japan J1 League', 'kor.1': 'South Korea K League 1', 'chn.1': 'China Super League',
+    'aus.1': 'Australia A-League', 'ind.1': 'India Super League', 'ksa.1': 'Saudi Pro League',
+    'uae.1': 'UAE Pro League', 'qat.1': 'Qatar Stars League', 'egy.1': 'Egypt Premier League',
+    'rsa.1': 'South Africa Premiership',
+    # Milli komandalar
+    'fifa.friendly': 'International Friendly', 'uefa.nations': 'UEFA Nations League',
+    'uefa.euroq': 'UEFA Euro Qualifying', 'concacaf.nations.league': 'CONCACAF Nations League',
+}
+ESPN_STATS_PER_REFRESH = 300   # hər yeniləmədə neçə oyun üçün künc/kart statistikası yüklənsin (qalanı növbəti yeniləmələrdə)
+ESPN_STATS_MAX_TRIES = 2       # statistikası gəlməyən oyun üçün neçə dəfə cəhd olunsun
+
+# ---- football-data.co.uk "Extra Leagues" (yalnız hesab; qeyd: hər fayl bütün mövsümləri saxlayır) ----
+FDX_DIR = ROOT / 'football-data-extra'
+FDX_CODES = ['ARG', 'AUT', 'BRA', 'CHN', 'DNK', 'FIN', 'IRL', 'JPN', 'MEX', 'NOR', 'POL', 'ROU', 'RUS', 'SWE', 'SWZ', 'USA']
+FDX_DAYS = 800   # son neçə günün oyunları saxlanılsın
+
+# ---- international_results (GitHub, martj42; milli komandaların bütün nəticələri, CC0) ----
+IR_DIR = ROOT / 'international-results'
+IR_URL = 'https://raw.githubusercontent.com/martj42/international_results/master/results.csv'
+IR_DAYS = 800   # son neçə günün oyunları saxlanılsın
+
+# ---- openfootball (GitHub, açıq JSON; hesab + yarımvaxt hesabı) ----
+OF_DIR = ROOT / 'openfootball-data'
+OF_BASE = 'https://raw.githubusercontent.com/openfootball/football.json/master'
+OF_LEAGUES = {
+    'en.1': 'England Premier League', 'en.2': 'England Championship', 'en.3': 'England League One', 'en.4': 'England League Two',
+    'de.1': 'Germany Bundesliga', 'de.2': 'Germany Bundesliga 2', 'es.1': 'Spain La Liga', 'es.2': 'Spain Segunda',
+    'it.1': 'Italy Serie A', 'it.2': 'Italy Serie B', 'fr.1': 'France Ligue 1', 'fr.2': 'France Ligue 2',
+    'nl.1': 'Netherlands Eredivisie', 'pt.1': 'Portugal Primeira Liga', 'tr.1': 'Turkey Super Lig',
+    'at.1': 'Austria Bundesliga', 'be.1': 'Belgium Pro League', 'gr.1': 'Greece Super League',
+    'sco.1': 'Scotland Premiership', 'at.2': 'Austria 2 Liga',
+}  # mövsüm qovluqları (2026-27, 2025-26); fayl tapılmayan (404) kodlar səssizcə atlanır
+# Təqvim ili ilə oynanan liqalar (qovluq adı: 2026, 2025)
+OF_YEAR_LEAGUES = {
+    'br.1': 'Brazil Serie A', 'br.2': 'Brazil Serie B', 'ar.1': 'Argentina Primera Division',
+    'co.1': 'Colombia Primera A', 'jp.1': 'Japan J1 League', 'cn.1': 'China Super League',
+    'mls': 'USA MLS', 'copa.l': 'Copa Libertadores',
 }
 ESPN_DAYS_BACK_FIRST = 60   # ilk yükləmədə neçə gün geriyə
 ESPN_DAYS_BACK = 14         # sonrakı yeniləmələrdə (köhnə nəticələr faylda saxlanılır)
@@ -179,7 +239,7 @@ st.markdown(CSS, unsafe_allow_html=True)
 st.markdown(
     '<div class="hero"><h1>⚽ Futbol Filtri</h1>'
     '<p>Hər komandanın son oyunlarını yoxlayır və bütün seçilmiş şərtlərə uyğun gələn matçları tapır.</p>'
-    '<div class="tags"><span>Open Matchday</span><span>football-data.co.uk</span><span>ESPN</span><span>API açarı lazım deyil</span></div></div>',
+    '<div class="tags"><span>Open Matchday</span><span>football-data.co.uk</span><span>ESPN</span><span>openfootball</span><span>API açarı lazım deyil</span></div></div>',
     unsafe_allow_html=True
 )
 
@@ -225,7 +285,105 @@ def load_fd():
             pd.concat(res, ignore_index=True) if res else pd.DataFrame())
 
 
-SRC_LABELS = {'FD': 'football-data.co.uk', 'OM': 'Open Matchday', 'ES': 'ESPN'}
+def load_fdx():
+    """football-data.co.uk/new/*.csv (əlavə liqalar: Braziliya, ABŞ, Yaponiya və s.) — yalnız hesab."""
+    out = []
+    if FDX_DIR.exists():
+        for f in FDX_DIR.glob('*.csv'):
+            df = read_csv_safe(f)
+            if df is None or df.empty:
+                continue
+            df.columns = [str(c).strip() for c in df.columns]
+            if not {'Home', 'Away', 'HG', 'AG', 'Date'} <= set(df.columns):
+                continue
+            d = pd.DataFrame({'date': parse_fd_date(df['Date']), 'time': df['Time'] if 'Time' in df.columns else '',
+                              'home': df['Home'], 'away': df['Away'],
+                              'ft_home': pd.to_numeric(df['HG'], errors='coerce'), 'ft_away': pd.to_numeric(df['AG'], errors='coerce')})
+            ctry = df['Country'].astype(str) if 'Country' in df.columns else pd.Series(f.stem, index=df.index)
+            lg = df['League'].astype(str) if 'League' in df.columns else pd.Series('', index=df.index)
+            d['league'] = (ctry + ' ' + lg).str.strip()
+            d = d.dropna(subset=['date', 'ft_home', 'ft_away'])
+            d = d[d['date'] >= pd.Timestamp.now() - pd.Timedelta(days=FDX_DAYS)]
+            out.append(d)
+    return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
+
+
+def load_ir():
+    """Milli komandaların nəticələri (yalnız hesab; qarşıdakı oyunlar ESPN-dən gəlir)."""
+    f = IR_DIR / 'results.csv'
+    df = read_csv_safe(f) if f.exists() else None
+    if df is None or df.empty or not {'date', 'home_team', 'away_team', 'home_score', 'away_score', 'tournament'} <= set(df.columns):
+        return pd.DataFrame()
+    d = pd.DataFrame({'date': pd.to_datetime(df['date'], errors='coerce'), 'home': df['home_team'], 'away': df['away_team'],
+                      'ft_home': pd.to_numeric(df['home_score'], errors='coerce'), 'ft_away': pd.to_numeric(df['away_score'], errors='coerce'),
+                      'league': 'International ' + df['tournament'].astype(str)})
+    d = d.dropna(subset=['date', 'ft_home', 'ft_away'])
+    return d[d['date'] >= pd.Timestamp.now() - pd.Timedelta(days=IR_DAYS)]
+
+
+def refresh_ir():
+    IR_DIR.mkdir(exist_ok=True)
+    r = requests.get(IR_URL, timeout=60, headers={'User-Agent': 'FutbolFiltri/1.0'})
+    r.raise_for_status()
+    if len(r.content) < 1000:
+        raise RuntimeError('boş cavab')
+    (IR_DIR / 'results.csv').write_bytes(r.content)
+    load_data.clear()
+
+
+def _of_rows(data, league):
+    fix, res = [], []
+    ok = lambda v: isinstance(v, (list, tuple)) and len(v) == 2 and all(isinstance(x, (int, float)) for x in v)
+    for m in data.get('matches', []) or []:
+        try:
+            h, a = m['team1'], m['team2']
+            h = h.get('name') if isinstance(h, dict) else h
+            a = a.get('name') if isinstance(a, dict) else a
+            row = {'date': m['date'], 'time': m.get('time', ''), 'home': h, 'away': a, 'league': league}
+        except (KeyError, TypeError, AttributeError):
+            continue
+        sc = m.get('score')
+        ft = ht = None
+        if isinstance(sc, dict):
+            ft, ht = sc.get('ft'), sc.get('ht')
+        elif isinstance(sc, list):
+            ft = sc
+        if ok(ft):
+            row['ft_home'], row['ft_away'] = int(ft[0]), int(ft[1])
+            if ok(ht) and ht[0] <= ft[0] and ht[1] <= ft[1]:
+                row['ht_home'], row['ht_away'] = int(ht[0]), int(ht[1])
+            res.append(row)
+        elif not sc:
+            fix.append(row)
+    return fix, res
+
+
+def load_of():
+    fix, res = [], []
+    if OF_DIR.exists():
+        for f in OF_DIR.glob('*.json'):
+            code = f.stem.split('_', 1)[-1]
+            try:
+                data = json.loads(f.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                continue
+            fx, rs = _of_rows(data, OF_LEAGUES.get(code) or OF_YEAR_LEAGUES.get(code) or data.get('name', code))
+            fix += fx
+            res += rs
+    return pd.DataFrame(fix), pd.DataFrame(res)
+
+
+def of_years():
+    return [str(datetime.now().year - k) for k in range(2)]
+
+
+def of_seasons():
+    now = datetime.now()
+    y = now.year if now.month >= 7 else now.year - 1
+    return [f'{y - k}-{(y - k + 1) % 100:02d}' for k in range(2)]
+
+
+SRC_LABELS = {'FD': 'football-data.co.uk', 'OM': 'Open Matchday', 'ES': 'ESPN', 'OF': 'openfootball', 'IR': 'international_results'}
 
 
 def src_label(code):
@@ -266,26 +424,86 @@ def names_compatible(a, b):
     return _tokens_match(ta, tb)
 
 
-def learn_key_map(fd, om):
-    """Eyni gün oynanan və hər iki komandası uyğun gələn oyunlardan football-data adlarını Open Matchday adlarına çevirən xəritə öyrənir."""
-    if fd.empty or om.empty:
-        return {}
-    m = fd[['date', 'home_k', 'away_k']].dropna().drop_duplicates().merge(
-        om[['date', 'home_k', 'away_k']].dropna().drop_duplicates(), on='date', suffixes=('', '_om'))
-    votes = Counter()
-    for h, a, ho, ao in zip(m['home_k'], m['away_k'], m['home_k_om'], m['away_k_om']):
-        if h == ho and a == ao:
-            continue
-        if names_compatible(h, ho) and names_compatible(a, ao):
-            if h != ho:
-                votes[(h, ho)] += 1
-            if a != ao:
-                votes[(a, ao)] += 1
-    best = {}
+def _strong_votes(a, b):
+    """Eyni gün (±1 gün) və bir komanda eynidirsə, digər tərəflər də eyni komandadır (komanda gündə bir oyun keçirir)."""
+    strong = Counter()
+    for off in (-1, 0, 1):
+        bb = b.copy()
+        bb['date'] = bb['date'] + pd.Timedelta(days=off)
+        for side, other in (('away', 'home'), ('home', 'away')):
+            mm = a.merge(bb, on=['date', f'{side}_k'], suffixes=('', '_om'))
+            mm = mm[mm[f'{other}_k'] != mm[f'{other}_k_om']]
+            for k, t in zip(mm[f'{other}_k'], mm[f'{other}_k_om']):
+                strong[(k, t)] += 1
+    return strong
+
+
+def _best_votes(votes, min_share=0.6):
+    """Hər açar üçün ən çox səs toplayan hədəfi seçir; səslərin ən azı min_share hissəsini toplamayıbsa (qeyri-müəyyən) əlavə etmir."""
+    best, total = {}, Counter()
     for (k, target), n in votes.items():
+        total[k] += n
         if k not in best or n > best[k][1]:
             best[k] = (target, n)
-    return {k: v[0] for k, v in best.items()}
+    return {k: v[0] for k, v in best.items() if k != v[0] and v[1] / total[k] >= min_share}
+
+
+def learn_key_map(fd, om):
+    """Eyni oyunun iki mənbədəki komanda adlarını müqayisə edib football-data adlarını digər mənbənin adlarına çevirən xəritə öyrənir.
+    1-ci dövr: eyni gün, hər iki ad uyğundur ('man city' ~ 'manchester city') + bir komanda eynidirsə digəri də eynidir (±1 gün, ən azı 2 səs).
+    Sonrakı dövrlər: öyrənilənləri tətbiq edib qalan adları (məsələn tarixi 1 gün sürüşən oyunlardan) yenə eyni qaydayla öyrənir."""
+    if fd.empty or om.empty:
+        return {}
+    a = fd[['date', 'home_k', 'away_k']].dropna().drop_duplicates()
+    b = om[['date', 'home_k', 'away_k']].dropna().drop_duplicates()
+    originals = set(a['home_k']) | set(a['away_k'])
+    kmap = {}
+    cur = a
+    for rnd in range(3):
+        votes = Counter()
+        if rnd == 0:
+            m = cur.merge(b, on='date', suffixes=('', '_om'))
+            for h, aw, ho, ao in zip(m['home_k'], m['away_k'], m['home_k_om'], m['away_k_om']):
+                if h == ho and aw == ao:
+                    continue
+                if names_compatible(h, ho) and names_compatible(aw, ao):
+                    if h != ho:
+                        votes[(h, ho)] += 1
+                    if aw != ao:
+                        votes[(aw, ao)] += 1
+        for pair, n in _strong_votes(cur, b).items():
+            if n >= 2:
+                votes[pair] += n
+        new = _best_votes(votes)
+        if not new:
+            break
+        for k in originals:
+            c = kmap.get(k, k)
+            if c in new:
+                kmap[k] = new[c]
+        cur = cur.copy()
+        cur['home_k'] = cur['home_k'].map(lambda k: new.get(k, k))
+        cur['away_k'] = cur['away_k'].map(lambda k: new.get(k, k))
+    return kmap
+
+
+def collapse_near_dates(df):
+    """Eyni iki komandanın oyunu 1 gün fərqlə iki mənbədə yazılıbsa (saat qurşağı: ESPN UTC, digərləri yerli tarix) bir oyun kimi birləşdirir."""
+    if df.empty or not {'date', 'home_k', 'away_k'} <= set(df.columns):
+        return df
+    df = df.dropna(subset=['date', 'home_k', 'away_k']).copy()
+    df['date'] = pd.to_datetime(df['date'])
+    df = df.sort_values(['home_k', 'away_k', 'date'], kind='stable').reset_index(drop=True)
+    gap = df.groupby(['home_k', 'away_k'])['date'].diff()
+    cid = ((gap.isna()) | (gap > pd.Timedelta(days=1))).cumsum()
+    size = cid.map(cid.value_counts())
+    single, multi = df[size == 1], df[size > 1]
+    if multi.empty:
+        return df
+    agg = {c: 'first' for c in multi.columns if c != 'src'}
+    agg['src'] = lambda x: '+'.join(sorted(set('+'.join(x).split('+'))))
+    merged = multi.groupby(cid[size > 1], sort=False).agg(agg)
+    return pd.concat([single, merged], ignore_index=True)
 
 
 def apply_key_map(df, kmap):
@@ -321,7 +539,7 @@ def load_espn():
         if df is None or df.empty or not {'date', 'home', 'away'} <= set(df.columns):
             out.append(pd.DataFrame())
         else:
-            out.append(df)
+            out.append(df.drop(columns=['id', 'slug', 'stats_try'], errors='ignore'))
     return out[0], out[1]
 
 
@@ -376,11 +594,20 @@ def load_data():
             results.append(df)
     om_fix = add_keys(pd.concat(fixtures, ignore_index=True) if fixtures else pd.DataFrame(), 'OM')
     om_res = add_keys(pd.concat(results, ignore_index=True) if results else pd.DataFrame(), 'OM')
+    of_fix, of_res = load_of()
+    om_fix = combine_sources(om_fix, add_keys(of_fix, 'OF'))
+    om_res = combine_sources(om_res, add_keys(of_res, 'OF'))
     es_fix, es_res = load_espn()
     om_fix = combine_sources(om_fix, add_keys(es_fix, 'ES'))
     om_res = combine_sources(om_res, add_keys(es_res, 'ES'))
     fd_fix, fd_res = load_fd()
     fd_fix, fd_res = add_keys(fd_fix, 'FD'), add_keys(fd_res, 'FD')
+    fdx_res = add_keys(load_fdx(), 'FD')
+    if not fdx_res.empty:
+        fd_res = pd.concat([x for x in (fd_res, fdx_res) if not x.empty], ignore_index=True)
+    ir_res = add_keys(load_ir(), 'IR')
+    if not ir_res.empty:
+        fd_res = pd.concat([x for x in (fd_res, ir_res) if not x.empty], ignore_index=True)
     fd_all = pd.concat([x for x in (fd_res, fd_fix) if not x.empty], ignore_index=True) if (not fd_res.empty or not fd_fix.empty) else pd.DataFrame()
     om_all = pd.concat([x for x in (om_res, om_fix) if not x.empty], ignore_index=True) if (not om_res.empty or not om_fix.empty) else pd.DataFrame()
     kmap = learn_key_map(fd_all, om_all)
@@ -392,6 +619,7 @@ def load_data():
                 df_['league'] = df_['league'].map(lambda l: lmap.get(l, l))
     fix, fix_only = merge_sources(fd_fix, om_fix)
     res, res_only = merge_sources(fd_res, om_res)
+    fix, res = collapse_near_dates(fix), collapse_near_dates(res)
     for df_ in (fix, res):
         if not df_.empty and 'league' in df_.columns:
             df_['league'] = df_['league'].map(pretty_league)
@@ -448,6 +676,46 @@ def refresh_fd():
     return ok, failed
 
 
+def refresh_fdx():
+    FDX_DIR.mkdir(exist_ok=True)
+    def one(code):
+        try:
+            r = requests.get(f'{FD_BASE}/new/{code}.csv', timeout=40, headers={'User-Agent': 'FutbolFiltri/1.0'})
+            if r.status_code == 200 and len(r.content) > 200:
+                (FDX_DIR / f'{code}.csv').write_bytes(r.content)
+                return code, True
+        except requests.RequestException:
+            pass
+        return code, False
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        got = list(ex.map(one, FDX_CODES))
+    load_data.clear()
+    return sum(1 for _, ok in got if ok), [c for c, ok in got if not ok]
+
+
+def refresh_of():
+    OF_DIR.mkdir(exist_ok=True)
+    jobs = [(s_, c) for s_ in of_seasons() for c in OF_LEAGUES] + [(y_, c) for y_ in of_years() for c in OF_YEAR_LEAGUES]
+    def one(job):
+        s_, c = job
+        try:
+            r = requests.get(f'{OF_BASE}/{s_}/{c}.json', timeout=30, headers={'User-Agent': 'FutbolFiltri/1.0'})
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, dict) and data.get('matches'):
+                    (OF_DIR / f'{s_}_{c}.json').write_text(json.dumps(data), encoding='utf-8')
+                    return True
+            elif r.status_code == 404:
+                return None   # bu mövsüm/liqa üçün fayl yoxdur — normaldır
+        except (requests.RequestException, ValueError):
+            pass
+        return False
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        got = list(ex.map(one, jobs))
+    load_data.clear()
+    return sum(1 for g in got if g), sum(1 for g in got if g is False)
+
+
 def _espn_get(sess, params):
     return sess.get(f'{ESPN_BASE}/{params[0]}/scoreboard', params=params[1], timeout=25)
 
@@ -458,7 +726,14 @@ def _espn_score(v):
     return pd.to_numeric(v, errors='coerce')
 
 
-def _espn_parse(data, default_name):
+def _espn_ht(side):
+    ls = side.get('linescores')
+    if isinstance(ls, list) and len(ls) >= 2 and isinstance(ls[0], dict):
+        return _espn_score(ls[0])
+    return float('nan')
+
+
+def _espn_parse(data, default_name, slug=''):
     """Bir scoreboard cavabından (fixtures, results) sətirləri çıxarır."""
     name = default_name
     try:
@@ -474,12 +749,16 @@ def _espn_parse(data, default_name):
             stype = ev['status']['type']
             dt = pd.to_datetime(ev['date'], utc=True)
             row = {'date': dt.strftime('%Y-%m-%d'), 'time': dt.strftime('%H:%M'),
-                   'home': h['team']['displayName'], 'away': a['team']['displayName'], 'league': name}
+                   'home': h['team']['displayName'], 'away': a['team']['displayName'], 'league': name,
+                   'id': str(ev.get('id', '')), 'slug': slug}
             if stype.get('completed'):
                 fh, fa = _espn_score(h.get('score')), _espn_score(a.get('score'))
                 if pd.isna(fh) or pd.isna(fa):
                     continue
                 row['ft_home'], row['ft_away'] = int(fh), int(fa)
+                hh, ha = _espn_ht(h), _espn_ht(a)
+                if pd.notna(hh) and pd.notna(ha) and hh <= fh and ha <= fa:
+                    row['ht_home'], row['ht_away'] = int(hh), int(ha)
                 res.append(row)
             elif stype.get('name') == 'STATUS_SCHEDULED':
                 fix.append(row)
@@ -498,7 +777,7 @@ def _espn_fetch_league(slug, default_name, start, end):
         probe = _espn_get(sess, (slug, {'dates': end.strftime(fmt), 'limit': 300}))
         if probe.status_code != 200:
             return fix, res, f'{slug} (HTTP {probe.status_code})'
-        f, r, name = _espn_parse(probe.json(), default_name)
+        f, r, name = _espn_parse(probe.json(), default_name, slug)
         fix += f
         res += r
         # Əvvəl tarix aralığı ilə sına; işləməsə gün-gün yüklə.
@@ -513,7 +792,7 @@ def _espn_fetch_league(slug, default_name, start, end):
                 rr = _espn_get(sess, (slug, {'dates': f'{c0.strftime(fmt)}-{c1.strftime(fmt)}', 'limit': 300}))
                 if rr.status_code == 200:
                     range_ok = True
-                    f, r, _ = _espn_parse(rr.json(), name)
+                    f, r, _ = _espn_parse(rr.json(), name, slug)
                     fix += f
                     res += r
                     continue
@@ -522,13 +801,50 @@ def _espn_fetch_league(slug, default_name, start, end):
             while d <= c1:
                 rd = _espn_get(sess, (slug, {'dates': d.strftime(fmt), 'limit': 300}))
                 if rd.status_code == 200:
-                    f, r, _ = _espn_parse(rd.json(), name)
+                    f, r, _ = _espn_parse(rd.json(), name, slug)
                     fix += f
                     res += r
                 d += timedelta(days=1)
     except (requests.RequestException, ValueError) as e:
         return fix, res, f'{slug} ({type(e).__name__})'
     return fix, res, None
+
+
+def _espn_stats(slug, event_id):
+    """Bir oyunun künc və sarı kart sayını ESPN 'summary' endpointindən çıxarır. Tapılmasa boş dict qaytarır."""
+    try:
+        r = requests.get(f'{ESPN_BASE}/{slug}/summary', params={'event': event_id}, timeout=25,
+                         headers={'User-Agent': 'FutbolFiltri/1.0'})
+        if r.status_code != 200:
+            return {}
+        data = r.json()
+    except (requests.RequestException, ValueError):
+        return {}
+    side_of = {}
+    try:
+        for c in data['header']['competitions'][0]['competitors']:
+            side_of[str(c['team']['id'])] = c.get('homeAway')
+    except (KeyError, IndexError, TypeError):
+        pass
+    out = {}
+    for t in (data.get('boxscore') or {}).get('teams', []) or []:
+        side = t.get('homeAway') or side_of.get(str((t.get('team') or {}).get('id')))
+        if side not in ('home', 'away'):
+            continue
+        for stt in t.get('statistics', []) or []:
+            name, label = str(stt.get('name', '')).lower(), str(stt.get('label', '')).lower()
+            val = pd.to_numeric(stt.get('displayValue', stt.get('value')), errors='coerce')
+            if pd.isna(val):
+                continue
+            if name in ('woncorners', 'cornerkicks', 'corners') or 'corner' in label:
+                out.setdefault(f'{side}_corners', int(val))
+            elif name == 'yellowcards' or 'yellow' in label:
+                out.setdefault(f'{side}_yellow', int(val))
+    for a_, b_ in (('home_corners', 'away_corners'), ('home_yellow', 'away_yellow')):
+        if not (a_ in out and b_ in out):
+            out.pop(a_, None)
+            out.pop(b_, None)
+    return out
 
 
 def refresh_espn():
@@ -539,7 +855,7 @@ def refresh_espn():
     start = today_ - timedelta(days=ESPN_DAYS_BACK_FIRST if first else ESPN_DAYS_BACK)
     end = today_ + timedelta(days=ESPN_DAYS_AHEAD)
     all_fix, all_res, failed = [], [], []
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=8) as ex:
         futs = {slug: ex.submit(_espn_fetch_league, slug, name, start, end) for slug, name in ESPN_LEAGUES.items()}
         for slug, fu in futs.items():
             f, r, err = fu.result()
@@ -547,20 +863,42 @@ def refresh_espn():
             all_res += r
             if err:
                 failed.append(err)
-    res_new = pd.DataFrame(all_res)
-    if not res_new.empty and old_res_path.exists():
-        old = read_csv_safe(old_res_path)
-        if old is not None and not old.empty:
-            res_new = pd.concat([res_new, old], ignore_index=True)
-    if not res_new.empty:
-        res_new = res_new.drop_duplicates(subset=['date', 'home', 'away'], keep='first').sort_values('date')
-        res_new.to_csv(old_res_path, index=False)
+    key = ['date', 'home', 'away']
+    res_all = pd.DataFrame(all_res)
+    old = read_csv_safe(old_res_path) if old_res_path.exists() else None
+    if old is not None and not old.empty:
+        old = old.drop_duplicates(subset=key)
+        if res_all.empty:
+            res_all = old
+        else:
+            res_all = res_all.drop_duplicates(subset=key).set_index(key).combine_first(old.set_index(key)).reset_index()
+    stats_done = stats_left = 0
+    if not res_all.empty:
+        for col in ('home_corners', 'away_corners', 'home_yellow', 'away_yellow', 'stats_try', 'id', 'slug'):
+            if col not in res_all.columns:
+                res_all[col] = float('nan')
+        res_all['stats_try'] = pd.to_numeric(res_all['stats_try'], errors='coerce').fillna(0)
+        need = (res_all['id'].notna() & res_all['slug'].notna() & res_all['home_corners'].isna()
+                & (res_all['stats_try'] < ESPN_STATS_MAX_TRIES))
+        pend = res_all[need].sort_values('date', ascending=False).head(ESPN_STATS_PER_REFRESH)
+        stats_left = int(need.sum()) - len(pend)
+        if not pend.empty:
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                got = list(ex.map(lambda t: _espn_stats(t[0], t[1]), zip(pend['slug'], pend['id'])))
+            for idx, st_ in zip(pend.index, got):
+                res_all.at[idx, 'stats_try'] += 1
+                if st_:
+                    stats_done += 1
+                    for k, v in st_.items():
+                        res_all.at[idx, k] = v
+        res_all = res_all.sort_values('date')
+        res_all.to_csv(old_res_path, index=False)
     fix_new = pd.DataFrame(all_fix)
     if not fix_new.empty:
         fix_new = fix_new.drop_duplicates(subset=['date', 'home', 'away']).sort_values(['date', 'time'])
         fix_new.to_csv(ESPN_DIR / 'fixtures.csv', index=False)
     load_data.clear()
-    return len(res_new), len(fix_new), failed
+    return len(res_all), len(fix_new), failed, stats_done, stats_left
 
 
 with st.sidebar:
@@ -584,8 +922,26 @@ with st.sidebar:
             except Exception as e:
                 msgs.append(('error', f'football-data.co.uk yenilənmədi: {e}'))
             try:
-                n_res, n_fix, espn_failed = refresh_espn()
-                msgs.append(('success', f'ESPN: {n_res} nəticə, {n_fix} qarşıdakı oyun.'))
+                ok, failed = refresh_fdx()
+                msgs.append(('success', f'football-data.co.uk (əlavə liqalar): {ok} fayl yükləndi.'))
+                if failed:
+                    msgs.append(('warning', 'Yüklənməyən əlavə liqalar: ' + ', '.join(failed)))
+            except Exception as e:
+                msgs.append(('error', f'football-data.co.uk əlavə liqalar yenilənmədi: {e}'))
+            try:
+                refresh_ir()
+                msgs.append(('success', 'international_results (milli komandalar) yeniləndi.'))
+            except Exception as e:
+                msgs.append(('error', f'international_results yenilənmədi: {e}'))
+            try:
+                ok, bad = refresh_of()
+                msgs.append(('success', f'openfootball: {ok} fayl yükləndi.' + (f' Xətalı: {bad}.' if bad else '')))
+            except Exception as e:
+                msgs.append(('error', f'openfootball yenilənmədi: {e}'))
+            try:
+                n_res, n_fix, espn_failed, st_done, st_left = refresh_espn()
+                msgs.append(('success', f'ESPN: {n_res} nəticə, {n_fix} qarşıdakı oyun. Künc/kart statistikası: {st_done} oyun yükləndi'
+                             + (f', {st_left} oyun növbəti yeniləmədə davam edəcək.' if st_left > 0 else '.')))
                 if espn_failed:
                     msgs.append(('warning', f'ESPN-də yüklənməyən yarışlar ({len(espn_failed)}): ' + ', '.join(espn_failed)))
             except Exception as e:
@@ -865,7 +1221,8 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
 
 with st.expander('Məlumat bazası haqqında'):
     st.write(f'Çempionat qovluqları: {len(list(DATA_DIR.iterdir())) if DATA_DIR.exists() else 0}. Qarşıdakı oyun sətri: {len(fixtures)}. Tarixi nəticə sətri: {len(results)}. Siyahıdakı liqa sayı: {len(league_options)}.')
-    st.write('Mənbələr: Open Matchday — https://github.com/oladeeayo/open-matchday, football-data.co.uk və ESPN (qitə kubokları: AFC, CAF, Libertadores və s.). Eyni oyun bir neçə mənbədə varsa statistika üçün əvvəlcə football-data.co.uk, sonra Open Matchday, sonra ESPN götürülür. Statistikası olmayan oyunlar müvafiq statistik filtrdə uyğun sayılmır.')
+    st.write('Mənbələr: Open Matchday — https://github.com/oladeeayo/open-matchday, football-data.co.uk (əsas və əlavə liqalar), openfootball (https://github.com/openfootball/football.json), international_results (https://github.com/martj42/international_results, milli komandalar) və ESPN (qitə kubokları, daxili kuboklar və onlarla liqa; yarımvaxt, künc və sarı kart ESPN-dən də çıxarılır). Eyni oyun bir neçə mənbədə varsa statistika üçün əvvəlcə football-data.co.uk, sonra Open Matchday, sonra openfootball, sonra ESPN götürülür. Statistikası olmayan oyunlar müvafiq statistik filtrdə uyğun sayılmır.')
+    st.write(f'Əlavə liqa faylları (football-data.co.uk/new): {len(list(FDX_DIR.glob("*.csv"))) if FDX_DIR.exists() else 0}. openfootball faylları: {len(list(OF_DIR.glob("*.json"))) if OF_DIR.exists() else 0}.')
     if FD_DIR.exists() and any(FD_DIR.glob('*.csv')):
         st.write(f'football-data.co.uk faylları: {len(list(FD_DIR.glob("*.csv")))}.')
     else:
