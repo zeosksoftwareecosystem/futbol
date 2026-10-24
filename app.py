@@ -124,23 +124,8 @@ def match_pass(row):
     return all(checks) if checks else True
 
 def team_last(team, date, league):
-    hist = results[
-        (results["date"] < date) &
-        (
-            (results["home"] == team) |
-            (results["away"] == team)
-        )
-    ].sort_values(
-        "date",
-        ascending=False
-    ).head(n_games)
-
-    if len(hist) < n_games:
-        return None
-
-    return hist
-
-
+    hist=results[(results['league']==league) & (results['date'] < date) & ((results['home']==team)|(results['away']==team))].sort_values('date', ascending=False).head(n_games)
+    if len(hist)<n_games: return None
     return hist
 
 if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=True):
@@ -150,38 +135,18 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
     if not criteria_selected:
         st.warning('Zəhmət olmasa ən azı bir filtr seç.')
         st.stop()
-    # Upcoming/current matches must come ONLY from fixtures.
-    # The results CSV may contain stale or historical rows stamped with today's
-    # date, so never use results as target matches for today or future dates.
-    # For fully past dates, use completed results as the target list.
-    today = pd.Timestamp.now().date()
+    # Target matches must include both scheduled fixtures AND completed results.
+    # The source's fixtures CSV mostly contains upcoming games, so scanning fixtures
+    # alone silently misses matches on past dates.
+    fixture_targets = fixtures[(fixtures['date'].dt.date >= date_from) & (fixtures['date'].dt.date <= date_to)].copy()
+    result_targets = results[(results['date'].dt.date >= date_from) & (results['date'].dt.date <= date_to)].copy()
     target_cols = ['date','time','home','away','league']
-
-    fixture_targets = fixtures[
-        (fixtures['date'].dt.date >= date_from) &
-        (fixtures['date'].dt.date <= date_to) &
-        (fixtures['date'].dt.date >= today)
-    ].copy()
-
-    result_targets = results[
-        (results['date'].dt.date >= date_from) &
-        (results['date'].dt.date <= date_to) &
-        (results['date'].dt.date < today)
-    ].copy()
-
     for frame in (fixture_targets, result_targets):
         for col in target_cols:
             if col not in frame.columns:
                 frame[col] = '' if col in ('time','league') else pd.NaT if col == 'date' else ''
-
-    day_games = pd.concat([result_targets[target_cols], fixture_targets[target_cols]], ignore_index=True)
-    day_games = day_games.dropna(subset=['date','home','away']).copy()
-    # Prefer fixture entries if a duplicate exists, and normalize duplicate keys.
-    day_games['_source_priority'] = day_games.apply(
-        lambda r: 1 if r['date'].date() >= today else 0, axis=1
-    )
-    day_games = day_games.sort_values('_source_priority', ascending=False)
-    day_games = day_games.drop_duplicates(subset=['date','league','home','away']).drop(columns=['_source_priority']).copy()
+    day_games = pd.concat([fixture_targets[target_cols], result_targets[target_cols]], ignore_index=True)
+    day_games = day_games.dropna(subset=['date','home','away']).drop_duplicates(subset=['date','league','home','away']).copy()
     if day_games.empty:
         st.warning('Bu tarix aralığında bazada oyun tapılmadı. Bu mənbə keçmiş tarixlər üçün əsasən nəticələr cədvəlindən istifadə edir; GitHub-dan yeniləməyi yoxla.')
         st.stop()
@@ -194,62 +159,16 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
             skipped += 1; progress.progress((i+1)/len(day_games)); continue
         if all(match_pass(r) for _,r in hhist.iterrows()) and all(match_pass(r) for _,r in ahist.iterrows()):
             passed.append({'Tarix':date.strftime('%Y-%m-%d'),'Saat':str(game.get('time','')),'Çempionat':league,'Ev sahibi':home,'Qonaq':away,'Son oyun sayı':n_games,
-                           'Ev sahibinin əvvəlki nəticələri': hhist.sort_values('date', ascending=False).to_dict('records'),
-                           'Qonağın əvvəlki nəticələri': ahist.sort_values('date', ascending=False).to_dict('records')})
+                           'Ev sahibinin əvvəlki nəticələri':' | '.join(f"{r['home']} {int(r['ft_home'])}-{int(r['ft_away'])} {r['away']}" for _,r in hhist.sort_values('date').iterrows()),
+                           'Qonağın əvvəlki nəticələri':' | '.join(f"{r['home']} {int(r['ft_home'])}-{int(r['ft_away'])} {r['away']}" for _,r in ahist.sort_values('date').iterrows())})
         progress.progress((i+1)/len(day_games))
     progress.empty()
     st.success(f'Yoxlanılan oyun: {len(day_games)} · Uyğun oyun: {len(passed)} · Tarixi çatmayan/az olan oyun: {skipped}')
     st.caption('Seçilmiş tarixdəki oyunlar həm qarşıdakı oyunlar, həm də artıq başa çatmış nəticələr cədvəlindən götürülür. Komandaların əvvəlki oyunları isə yalnız həmin oyunun tarixindən əvvəl axtarılır.')
     if passed:
-        out = pd.DataFrame(passed)
-        st.subheader('⚽ Uyğun oyunlar')
-        st.caption('Hər oyun ayrıca kartda göstərilir. Komandaların əvvəlki oyunları aşağı açılan hissələrdədir.')
-        for idx, item in enumerate(passed, start=1):
-            time_text = str(item.get('Saat', '')).strip()
-            if time_text.lower() in ('nan', 'nat', 'none', ''):
-                time_text = 'Saat məlum deyil'
-            league_text = str(item.get('Çempionat', ''))
-            league_text = league_text.replace('_', ' ').replace('-', ' ').strip()
-            st.markdown(
-                f'''<div style="border:1px solid #d8dee8;border-radius:12px;padding:14px 16px;margin:10px 0 4px 0;">
-                <div style="font-size:12px;color:#64748b;margin-bottom:6px;">{item['Tarix']} · {time_text} · {league_text}</div>
-                <div style="font-size:18px;font-weight:700;line-height:1.4;">{item['Ev sahibi']} <span style="color:#64748b;font-weight:400;">vs</span> {item['Qonaq']}</div>
-                <div style="font-size:12px;color:#64748b;margin-top:6px;">Hər komandanın son {item['Son oyun sayı']} oyunu yoxlanılıb</div>
-                </div>''',
-                unsafe_allow_html=True
-            )
-            # Keep previous games visible (not collapsed), with the date shown for every match.
-            for team_label, history_key in [
-                (item['Ev sahibi'], 'Ev sahibinin əvvəlki nəticələri'),
-                (item['Qonaq'], 'Qonağın əvvəlki nəticələri'),
-            ]:
-                st.markdown(
-                    f'<div style="font-weight:700;margin:10px 0 4px 0;">📋 {team_label} — əvvəlki {item["Son oyun sayı"]} oyun</div>',
-                    unsafe_allow_html=True
-                )
-                history = item[history_key]
-                for old_match in history:
-                    old_date = pd.to_datetime(old_match.get('date'), errors='coerce')
-                    date_text = old_date.strftime('%d.%m.%Y') if pd.notna(old_date) else 'Tarix məlum deyil'
-                    old_time = str(old_match.get('time', '')).strip()
-                    if old_time.lower() in ('nan', 'nat', 'none', ''):
-                        old_time = ''
-                    hg = old_match.get('ft_home')
-                    ag = old_match.get('ft_away')
-                    if pd.notna(hg) and pd.notna(ag):
-                        score = f'{int(hg)}–{int(ag)}'
-                    else:
-                        score = 'hesab yoxdur'
-                    old_home = str(old_match.get('home', ''))
-                    old_away = str(old_match.get('away', ''))
-                    st.markdown(
-                        f'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:8px 12px;margin:4px 0 6px 0;">'
-                        f'<span style="color:#64748b;font-size:12px;">{date_text}{(" · " + old_time) if old_time else ""}</span><br>'
-                        f'<span style="font-weight:500;">{old_home}</span> <b>{score}</b> <span style="font-weight:500;">{old_away}</span>'
-                        f'</div>',
-                        unsafe_allow_html=True
-                    )
-        st.download_button('⬇️ Nəticələri CSV kimi yüklə', out.to_csv(index=False).encode('utf-8-sig'), file_name='futbol_filtri_neticeleri.csv', mime='text/csv')
+        out=pd.DataFrame(passed)
+        st.dataframe(out, use_container_width=True, hide_index=True)
+        st.download_button('Nəticələri CSV kimi yüklə', out.to_csv(index=False).encode('utf-8-sig'), file_name='futbol_filtri_neticeleri.csv', mime='text/csv')
     else:
         st.info('Seçilən şərtlərə uyğun oyun tapılmadı. Tarix aralığını genişləndir və ya filtrləri dəyiş.')
 
