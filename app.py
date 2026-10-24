@@ -1,9 +1,10 @@
 from pathlib import Path
-import zipfile, io, re, unicodedata, requests, shutil, tempfile
-from datetime import datetime
+import zipfile, io, re, unicodedata, requests, shutil, tempfile, json
+from datetime import datetime, timezone
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -49,6 +50,76 @@ ESPN_LEAGUES = {
     'conmebol.sudamericana': 'Copa Sudamericana',
     'concacaf.champions': 'CONCACAF Champions Cup',
     'concacaf.leagues.cup': 'Leagues Cup',
+    # Avropa kubokları
+    'uefa.champions': 'UEFA Champions League',
+    'uefa.europa': 'UEFA Europa League',
+    'uefa.europa.conf': 'UEFA Conference League',
+    # Daxili kuboklar
+    'eng.fa': 'England FA Cup',
+    'eng.league_cup': 'England League Cup',
+    'esp.copa_del_rey': 'Spain Copa del Rey',
+    'ger.dfb_pokal': 'Germany DFB Pokal',
+    'ita.coppa_italia': 'Italy Coppa Italia',
+    'fra.coupe_de_france': 'France Coupe de France',
+    # Avropa liqaları (football-data.co.uk əsas siyahısında olmayanlar)
+    'aut.1': 'Austria Bundesliga', 'den.1': 'Denmark Superliga', 'swe.1': 'Sweden Allsvenskan',
+    'nor.1': 'Norway Eliteserien', 'sui.1': 'Switzerland Super League', 'rus.1': 'Russia Premier League',
+    'ukr.1': 'Ukraine Premier League', 'pol.1': 'Poland Ekstraklasa', 'cze.1': 'Czech First League',
+    'cro.1': 'Croatia HNL', 'srb.1': 'Serbia SuperLiga', 'rou.1': 'Romania Liga I',
+    'irl.1': 'Ireland Premier Division', 'fin.1': 'Finland Veikkausliiga', 'aze.1': 'Azerbaijan Premier League',
+    'isr.1': 'Israel Premier League',
+    # Amerika
+    'usa.1': 'USA MLS', 'mex.1': 'Mexico Liga MX', 'bra.1': 'Brazil Serie A', 'bra.2': 'Brazil Serie B',
+    'arg.1': 'Argentina Primera Division', 'col.1': 'Colombia Primera A', 'chi.1': 'Chile Primera Division',
+    'uru.1': 'Uruguay Primera Division', 'ecu.1': 'Ecuador Serie A', 'per.1': 'Peru Liga 1', 'par.1': 'Paraguay Primera Division',
+    # Asiya, Okeaniya, Afrika
+    'jpn.1': 'Japan J1 League', 'kor.1': 'South Korea K League 1', 'chn.1': 'China Super League',
+    'aus.1': 'Australia A-League', 'ind.1': 'India Super League', 'ksa.1': 'Saudi Pro League',
+    'uae.1': 'UAE Pro League', 'qat.1': 'Qatar Stars League', 'egy.1': 'Egypt Premier League',
+    'rsa.1': 'South Africa Premiership',
+    # Milli komandalar
+    'fifa.friendly': 'International Friendly', 'uefa.nations': 'UEFA Nations League',
+    'uefa.euroq': 'UEFA Euro Qualifying', 'concacaf.nations.league': 'CONCACAF Nations League',
+}
+ESPN_STATS_PER_REFRESH = 300   # hər yeniləmədə neçə oyun üçün künc/kart statistikası yüklənsin (qalanı növbəti yeniləmələrdə)
+ESPN_STATS_MAX_TRIES = 2       # statistikası gəlməyən oyun üçün neçə dəfə cəhd olunsun
+
+# ---- football-data.co.uk "Extra Leagues" (yalnız hesab; qeyd: hər fayl bütün mövsümləri saxlayır) ----
+FDX_DIR = ROOT / 'football-data-extra'
+FDX_CODES = ['ARG', 'AUT', 'BRA', 'CHN', 'DNK', 'FIN', 'IRL', 'JPN', 'MEX', 'NOR', 'POL', 'ROU', 'RUS', 'SWE', 'SWZ', 'USA']
+FDX_DAYS = 800   # son neçə günün oyunları saxlanılsın
+
+# ---- international_results (GitHub, martj42; milli komandaların bütün nəticələri, CC0) ----
+IR_DIR = ROOT / 'international-results'
+IR_URL = 'https://raw.githubusercontent.com/martj42/international_results/master/results.csv'
+IR_DAYS = 800   # son neçə günün oyunları saxlanılsın
+
+# ---- openfootball (GitHub, açıq JSON; hesab + yarımvaxt hesabı) ----
+OF_DIR = ROOT / 'openfootball-data'
+OF_BASE = 'https://raw.githubusercontent.com/openfootball/football.json/master'
+OF_LEAGUES = {
+    'en.1': 'England Premier League', 'en.2': 'England Championship', 'en.3': 'England League One', 'en.4': 'England League Two',
+    'de.1': 'Germany Bundesliga', 'de.2': 'Germany Bundesliga 2', 'es.1': 'Spain La Liga', 'es.2': 'Spain Segunda',
+    'it.1': 'Italy Serie A', 'it.2': 'Italy Serie B', 'fr.1': 'France Ligue 1', 'fr.2': 'France Ligue 2',
+    'nl.1': 'Netherlands Eredivisie', 'pt.1': 'Portugal Primeira Liga', 'tr.1': 'Turkey Super Lig',
+    'at.1': 'Austria Bundesliga', 'be.1': 'Belgium Pro League', 'gr.1': 'Greece Super League',
+    'sco.1': 'Scotland Premiership', 'at.2': 'Austria 2 Liga',
+}  # mövsüm qovluqları (2026-27, 2025-26); fayl tapılmayan (404) kodlar səssizcə atlanır
+# Təqvim ili ilə oynanan liqalar (qovluq adı: 2026, 2025)
+OF_YEAR_LEAGUES = {
+    'br.1': 'Brazil Serie A', 'br.2': 'Brazil Serie B', 'ar.1': 'Argentina Primera Division',
+    'co.1': 'Colombia Primera A', 'jp.1': 'Japan J1 League', 'cn.1': 'China Super League',
+    'mls': 'USA MLS', 'copa.l': 'Copa Libertadores',
+}
+# openfootball-da saat liqanın ölkəsinin yerli saatıdır. Qurşağı bəlli olmayan liqalarda (None) saat dəyişdirilmir.
+OF_TZ = {
+    'en.1': 'Europe/London', 'en.2': 'Europe/London', 'en.3': 'Europe/London', 'en.4': 'Europe/London', 'sco.1': 'Europe/London',
+    'de.1': 'Europe/Berlin', 'de.2': 'Europe/Berlin', 'es.1': 'Europe/Madrid', 'es.2': 'Europe/Madrid',
+    'it.1': 'Europe/Rome', 'it.2': 'Europe/Rome', 'fr.1': 'Europe/Paris', 'fr.2': 'Europe/Paris',
+    'nl.1': 'Europe/Amsterdam', 'pt.1': 'Europe/Lisbon', 'tr.1': 'Europe/Istanbul', 'at.1': 'Europe/Vienna',
+    'at.2': 'Europe/Vienna', 'be.1': 'Europe/Brussels', 'gr.1': 'Europe/Athens',
+    'br.1': 'America/Sao_Paulo', 'br.2': 'America/Sao_Paulo', 'ar.1': 'America/Argentina/Buenos_Aires',
+    'co.1': 'America/Bogota', 'jp.1': 'Asia/Tokyo', 'cn.1': 'Asia/Shanghai',
 }
 ESPN_DAYS_BACK_FIRST = 60   # ilk yükləmədə neçə gün geriyə
 ESPN_DAYS_BACK = 14         # sonrakı yeniləmələrdə (köhnə nəticələr faylda saxlanılır)
@@ -172,6 +243,10 @@ section[data-testid="stSidebar"] .stButton button { border-radius: 10px; font-we
 .chip.y { background: rgba(234,179,8,.20); color: #b45309; }
 .chip.s { background: rgba(100,116,139,.18); color: inherit; opacity: .85; }
 
+.st-key-datenav [data-testid="stHorizontalBlock"] { flex-direction: row !important; flex-wrap: nowrap !important; gap: .5rem !important; }
+.st-key-datenav [data-testid="stColumn"], .st-key-datenav [data-testid="column"] { min-width: 0 !important; width: auto !important; flex: 1 1 0 !important; }
+.st-key-datenav [data-testid="stColumn"]:nth-child(2), .st-key-datenav [data-testid="column"]:nth-child(2) { flex: 3 1 0 !important; }
+.st-key-datenav button { min-height: 2.6rem; font-weight: 700; }
 @media (max-width: 700px) { .stats { grid-template-columns: 1fr; } .hero h1 { font-size: 22px; } }
 </style>
 """
@@ -179,7 +254,7 @@ st.markdown(CSS, unsafe_allow_html=True)
 st.markdown(
     '<div class="hero"><h1>⚽ Futbol Filtri</h1>'
     '<p>Hər komandanın son oyunlarını yoxlayır və bütün seçilmiş şərtlərə uyğun gələn matçları tapır.</p>'
-    '<div class="tags"><span>Open Matchday</span><span>football-data.co.uk</span><span>ESPN</span><span>API açarı lazım deyil</span></div></div>',
+    '<div class="tags"><span>Open Matchday</span><span>football-data.co.uk</span><span>ESPN</span><span>openfootball</span><span>API açarı lazım deyil</span></div></div>',
     unsafe_allow_html=True
 )
 
@@ -193,6 +268,44 @@ def read_csv_safe(path):
         except Exception:
             return None
     return None
+
+
+BAKU_TZ = timezone(timedelta(hours=4), 'Asia/Baku')   # Azərbaycan həmişə UTC+4 (yay/qış saatı yoxdur)
+
+
+def baku_today():
+    return datetime.now(BAKU_TZ).date()
+
+
+def to_baku(df, tz='UTC', tz_col=None):
+    """date + time sütunlarını mənbənin saat qurşağından Bakı vaxtına çevirir (tarix də dəyişə bilər).
+    tz: bütün sətirlər üçün saat qurşağı; tz_col: hər sətir üçün qurşağın yazıldığı sütun (None olan sətir toxunulmaz qalır).
+    Saatı olmayan və ya 'HH:MM' formatında olmayan sətirlər dəyişmir."""
+    if df is None or df.empty or 'time' not in df.columns or 'date' not in df.columns:
+        return df
+    df = df.copy()
+    d = pd.to_datetime(df['date'], errors='coerce')
+    t = df['time'].astype(str).str.strip()
+    ok = d.notna() & t.str.fullmatch(r'\d{1,2}:\d{2}').fillna(False)
+    df['date'] = d
+    if not ok.any():
+        return df
+    naive = pd.to_datetime(d.dt.strftime('%Y-%m-%d') + ' ' + t, format='%Y-%m-%d %H:%M', errors='coerce')
+    ok &= naive.notna()
+    zones = df[tz_col] if tz_col else pd.Series(tz, index=df.index)
+    out = pd.Series(pd.NaT, index=df.index, dtype='datetime64[ns]')
+    for z in zones[ok].dropna().unique():
+        m = ok & (zones == z)
+        try:
+            loc = naive[m].dt.tz_localize(z, ambiguous='NaT', nonexistent='shift_forward')
+            out[m] = loc.dt.tz_convert('Asia/Baku').dt.tz_localize(None)
+        except Exception:
+            continue
+    good = out.notna()
+    if good.any():
+        df.loc[good, 'date'] = out[good].dt.normalize()
+        df.loc[good, 'time'] = out[good].dt.strftime('%H:%M')
+    return df
 
 
 def parse_fd_date(col):
@@ -219,13 +332,117 @@ def load_fd():
             df['date'] = parse_fd_date(df['Date'])
             div = df['Div'] if 'Div' in df.columns else pd.Series('FD', index=df.index)
             df['league'] = div.map(FD_LEAGUES).fillna(div)
+            if 'time' in df.columns:
+                df['time'] = np.nan   # football-data.co.uk saat qurşağı dəqiq bəlli deyil; saat Open Matchday/openfootball/ESPN-dən götürülür
             df = df[[c for c in FD_KEEP if c in df.columns]]
             (fix if f.name == 'fixtures.csv' else res).append(df)
     return (pd.concat(fix, ignore_index=True) if fix else pd.DataFrame(),
             pd.concat(res, ignore_index=True) if res else pd.DataFrame())
 
 
-SRC_LABELS = {'FD': 'football-data.co.uk', 'OM': 'Open Matchday', 'ES': 'ESPN'}
+def load_fdx():
+    """football-data.co.uk/new/*.csv (əlavə liqalar: Braziliya, ABŞ, Yaponiya və s.) — yalnız hesab."""
+    out = []
+    if FDX_DIR.exists():
+        for f in FDX_DIR.glob('*.csv'):
+            df = read_csv_safe(f)
+            if df is None or df.empty:
+                continue
+            df.columns = [str(c).strip() for c in df.columns]
+            if not {'Home', 'Away', 'HG', 'AG', 'Date'} <= set(df.columns):
+                continue
+            d = pd.DataFrame({'date': parse_fd_date(df['Date']), 'time': df['Time'] if 'Time' in df.columns else '',
+                              'home': df['Home'], 'away': df['Away'],
+                              'ft_home': pd.to_numeric(df['HG'], errors='coerce'), 'ft_away': pd.to_numeric(df['AG'], errors='coerce')})
+            ctry = df['Country'].astype(str) if 'Country' in df.columns else pd.Series(f.stem, index=df.index)
+            lg = df['League'].astype(str) if 'League' in df.columns else pd.Series('', index=df.index)
+            d['league'] = (ctry + ' ' + lg).str.strip()
+            d = d.dropna(subset=['date', 'ft_home', 'ft_away'])
+            d = d[d['date'] >= pd.Timestamp.now() - pd.Timedelta(days=FDX_DAYS)]
+            out.append(d)
+    return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
+
+
+def load_ir():
+    """Milli komandaların nəticələri (yalnız hesab; qarşıdakı oyunlar ESPN-dən gəlir)."""
+    f = IR_DIR / 'results.csv'
+    df = read_csv_safe(f) if f.exists() else None
+    if df is None or df.empty or not {'date', 'home_team', 'away_team', 'home_score', 'away_score', 'tournament'} <= set(df.columns):
+        return pd.DataFrame()
+    d = pd.DataFrame({'date': pd.to_datetime(df['date'], errors='coerce'), 'home': df['home_team'], 'away': df['away_team'],
+                      'ft_home': pd.to_numeric(df['home_score'], errors='coerce'), 'ft_away': pd.to_numeric(df['away_score'], errors='coerce'),
+                      'league': 'International ' + df['tournament'].astype(str)})
+    d = d.dropna(subset=['date', 'ft_home', 'ft_away'])
+    return d[d['date'] >= pd.Timestamp.now() - pd.Timedelta(days=IR_DAYS)]
+
+
+def refresh_ir():
+    IR_DIR.mkdir(exist_ok=True)
+    r = requests.get(IR_URL, timeout=60, headers={'User-Agent': 'FutbolFiltri/1.0'})
+    r.raise_for_status()
+    if len(r.content) < 1000:
+        raise RuntimeError('boş cavab')
+    (IR_DIR / 'results.csv').write_bytes(r.content)
+    load_data.clear()
+
+
+def _of_rows(data, league, tz=None):
+    fix, res = [], []
+    ok = lambda v: isinstance(v, (list, tuple)) and len(v) == 2 and all(isinstance(x, (int, float)) for x in v)
+    for m in data.get('matches', []) or []:
+        try:
+            h, a = m['team1'], m['team2']
+            h = h.get('name') if isinstance(h, dict) else h
+            a = a.get('name') if isinstance(a, dict) else a
+            row = {'date': m['date'], 'time': m.get('time', ''), 'home': h, 'away': a, 'league': league, 'tz': tz}
+        except (KeyError, TypeError, AttributeError):
+            continue
+        sc = m.get('score')
+        ft = ht = None
+        if isinstance(sc, dict):
+            ft, ht = sc.get('ft'), sc.get('ht')
+        elif isinstance(sc, list):
+            ft = sc
+        if ok(ft):
+            row['ft_home'], row['ft_away'] = int(ft[0]), int(ft[1])
+            if ok(ht) and ht[0] <= ft[0] and ht[1] <= ft[1]:
+                row['ht_home'], row['ht_away'] = int(ht[0]), int(ht[1])
+            res.append(row)
+        elif not sc:
+            fix.append(row)
+    return fix, res
+
+
+def load_of():
+    fix, res = [], []
+    if OF_DIR.exists():
+        for f in OF_DIR.glob('*.json'):
+            code = f.stem.split('_', 1)[-1]
+            try:
+                data = json.loads(f.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                continue
+            fx, rs = _of_rows(data, OF_LEAGUES.get(code) or OF_YEAR_LEAGUES.get(code) or data.get('name', code), OF_TZ.get(code))
+            fix += fx
+            res += rs
+    out = []
+    for rows in (fix, res):
+        df = to_baku(pd.DataFrame(rows), tz_col='tz') if rows else pd.DataFrame()
+        out.append(df.drop(columns=['tz'], errors='ignore'))
+    return out[0], out[1]
+
+
+def of_years():
+    return [str(datetime.now().year - k) for k in range(2)]
+
+
+def of_seasons():
+    now = datetime.now()
+    y = now.year if now.month >= 7 else now.year - 1
+    return [f'{y - k}-{(y - k + 1) % 100:02d}' for k in range(2)]
+
+
+SRC_LABELS = {'FD': 'football-data.co.uk', 'OM': 'Open Matchday', 'ES': 'ESPN', 'OF': 'openfootball', 'IR': 'international_results'}
 
 
 def src_label(code):
@@ -266,26 +483,93 @@ def names_compatible(a, b):
     return _tokens_match(ta, tb)
 
 
-def learn_key_map(fd, om):
-    """Eyni gün oynanan və hər iki komandası uyğun gələn oyunlardan football-data adlarını Open Matchday adlarına çevirən xəritə öyrənir."""
-    if fd.empty or om.empty:
-        return {}
-    m = fd[['date', 'home_k', 'away_k']].dropna().drop_duplicates().merge(
-        om[['date', 'home_k', 'away_k']].dropna().drop_duplicates(), on='date', suffixes=('', '_om'))
-    votes = Counter()
-    for h, a, ho, ao in zip(m['home_k'], m['away_k'], m['home_k_om'], m['away_k_om']):
-        if h == ho and a == ao:
-            continue
-        if names_compatible(h, ho) and names_compatible(a, ao):
-            if h != ho:
-                votes[(h, ho)] += 1
-            if a != ao:
-                votes[(a, ao)] += 1
-    best = {}
+def _strong_votes(a, b):
+    """Eyni gün (±1 gün) və bir komanda eynidirsə, digər tərəflər də eyni komandadır (komanda gündə bir oyun keçirir)."""
+    strong = Counter()
+    for off in (-1, 0, 1):
+        bb = b.copy()
+        bb['date'] = bb['date'] + pd.Timedelta(days=off)
+        for side, other in (('away', 'home'), ('home', 'away')):
+            mm = a.merge(bb, on=['date', f'{side}_k'], suffixes=('', '_om'))
+            mm = mm[mm[f'{other}_k'] != mm[f'{other}_k_om']]
+            for k, t in zip(mm[f'{other}_k'], mm[f'{other}_k_om']):
+                strong[(k, t)] += 1
+    return strong
+
+
+def _best_votes(votes, min_share=0.6):
+    """Hər açar üçün ən çox səs toplayan hədəfi seçir; səslərin ən azı min_share hissəsini toplamayıbsa (qeyri-müəyyən) əlavə etmir."""
+    best, total = {}, Counter()
     for (k, target), n in votes.items():
+        total[k] += n
         if k not in best or n > best[k][1]:
             best[k] = (target, n)
-    return {k: v[0] for k, v in best.items()}
+    return {k: v[0] for k, v in best.items() if k != v[0] and v[1] / total[k] >= min_share}
+
+
+def learn_key_map(fd, om):
+    """Eyni oyunun iki mənbədəki komanda adlarını müqayisə edib football-data adlarını digər mənbənin adlarına çevirən xəritə öyrənir.
+    1-ci dövr: eyni gün, hər iki ad uyğundur ('man city' ~ 'manchester city') + bir komanda eynidirsə digəri də eynidir (±1 gün, ən azı 2 səs).
+    Sonrakı dövrlər: öyrənilənləri tətbiq edib qalan adları (məsələn tarixi 1 gün sürüşən oyunlardan) yenə eyni qaydayla öyrənir."""
+    if fd.empty or om.empty:
+        return {}
+    a = fd[['date', 'home_k', 'away_k']].dropna().drop_duplicates()
+    b = om[['date', 'home_k', 'away_k']].dropna().drop_duplicates()
+    originals = set(a['home_k']) | set(a['away_k'])
+    kmap = {}
+    cur = a
+    for rnd in range(3):
+        votes = Counter()
+        if rnd == 0:
+            m = cur.merge(b, on='date', suffixes=('', '_om'))
+            for h, aw, ho, ao in zip(m['home_k'], m['away_k'], m['home_k_om'], m['away_k_om']):
+                if h == ho and aw == ao:
+                    continue
+                if names_compatible(h, ho) and names_compatible(aw, ao):
+                    if h != ho:
+                        votes[(h, ho)] += 1
+                    if aw != ao:
+                        votes[(aw, ao)] += 1
+        for pair, n in _strong_votes(cur, b).items():
+            if n >= 2:
+                votes[pair] += n
+        new = _best_votes(votes)
+        if not new:
+            break
+        for k in originals:
+            c = kmap.get(k, k)
+            if c in new:
+                kmap[k] = new[c]
+        cur = cur.copy()
+        cur['home_k'] = cur['home_k'].map(lambda k: new.get(k, k))
+        cur['away_k'] = cur['away_k'].map(lambda k: new.get(k, k))
+    return kmap
+
+
+def collapse_near_dates(df):
+    """Eyni iki komandanın oyunu 1 gün fərqlə iki mənbədə yazılıbsa (saat qurşağı fərqi) bir oyun kimi birləşdirir.
+    Saatı olan sətir (Bakı vaxtına çevrilmiş) əvvəl gəlir ki, tarix və saat uyğun qalsın."""
+    if df.empty or not {'date', 'home_k', 'away_k'} <= set(df.columns):
+        return df
+    df = df.dropna(subset=['date', 'home_k', 'away_k']).copy()
+    df['date'] = pd.to_datetime(df['date'])
+    df = df.sort_values(['home_k', 'away_k', 'date'], kind='stable').reset_index(drop=True)
+    gap = df.groupby(['home_k', 'away_k'])['date'].diff()
+    cid = ((gap.isna()) | (gap > pd.Timedelta(days=1))).cumsum()
+    size = cid.map(cid.value_counts())
+    single, multi = df[size == 1], df[size > 1].copy()
+    if multi.empty:
+        return df
+    multi['_cid'] = cid[size > 1]
+    if 'time' in multi.columns:
+        multi['_ht'] = multi['time'].astype(str).str.strip().str.fullmatch(r'\d{1,2}:\d{2}').fillna(False)
+    else:
+        multi['_ht'] = False
+    multi = multi.sort_values(['_cid', '_ht'], ascending=[True, False], kind='stable')
+    agg = {c: 'first' for c in multi.columns if c not in ('src', '_cid', '_ht')}
+    agg['src'] = lambda x: '+'.join(sorted(set('+'.join(x).split('+'))))
+    merged = multi.groupby('_cid', sort=False).agg(agg).reset_index(drop=True)
+    return pd.concat([single, merged], ignore_index=True)
 
 
 def apply_key_map(df, kmap):
@@ -321,7 +605,7 @@ def load_espn():
         if df is None or df.empty or not {'date', 'home', 'away'} <= set(df.columns):
             out.append(pd.DataFrame())
         else:
-            out.append(df)
+            out.append(to_baku(df.drop(columns=['id', 'slug', 'stats_try'], errors='ignore'), 'UTC'))
     return out[0], out[1]
 
 
@@ -374,13 +658,23 @@ def load_data():
             fixtures.append(df)
         elif f.name.startswith('results_'):
             results.append(df)
-    om_fix = add_keys(pd.concat(fixtures, ignore_index=True) if fixtures else pd.DataFrame(), 'OM')
-    om_res = add_keys(pd.concat(results, ignore_index=True) if results else pd.DataFrame(), 'OM')
+    # Open Matchday sənədinə görə saat sabit UTC+1 (CET-1) qaydasıdır
+    om_fix = add_keys(to_baku(pd.concat(fixtures, ignore_index=True) if fixtures else pd.DataFrame(), 'Etc/GMT-1'), 'OM')
+    om_res = add_keys(to_baku(pd.concat(results, ignore_index=True) if results else pd.DataFrame(), 'Etc/GMT-1'), 'OM')
+    of_fix, of_res = load_of()
+    om_fix = combine_sources(om_fix, add_keys(of_fix, 'OF'))
+    om_res = combine_sources(om_res, add_keys(of_res, 'OF'))
     es_fix, es_res = load_espn()
     om_fix = combine_sources(om_fix, add_keys(es_fix, 'ES'))
     om_res = combine_sources(om_res, add_keys(es_res, 'ES'))
     fd_fix, fd_res = load_fd()
     fd_fix, fd_res = add_keys(fd_fix, 'FD'), add_keys(fd_res, 'FD')
+    fdx_res = add_keys(load_fdx(), 'FD')
+    if not fdx_res.empty:
+        fd_res = pd.concat([x for x in (fd_res, fdx_res) if not x.empty], ignore_index=True)
+    ir_res = add_keys(load_ir(), 'IR')
+    if not ir_res.empty:
+        fd_res = pd.concat([x for x in (fd_res, ir_res) if not x.empty], ignore_index=True)
     fd_all = pd.concat([x for x in (fd_res, fd_fix) if not x.empty], ignore_index=True) if (not fd_res.empty or not fd_fix.empty) else pd.DataFrame()
     om_all = pd.concat([x for x in (om_res, om_fix) if not x.empty], ignore_index=True) if (not om_res.empty or not om_fix.empty) else pd.DataFrame()
     kmap = learn_key_map(fd_all, om_all)
@@ -392,6 +686,7 @@ def load_data():
                 df_['league'] = df_['league'].map(lambda l: lmap.get(l, l))
     fix, fix_only = merge_sources(fd_fix, om_fix)
     res, res_only = merge_sources(fd_res, om_res)
+    fix, res = collapse_near_dates(fix), collapse_near_dates(res)
     for df_ in (fix, res):
         if not df_.empty and 'league' in df_.columns:
             df_['league'] = df_['league'].map(pretty_league)
@@ -448,6 +743,46 @@ def refresh_fd():
     return ok, failed
 
 
+def refresh_fdx():
+    FDX_DIR.mkdir(exist_ok=True)
+    def one(code):
+        try:
+            r = requests.get(f'{FD_BASE}/new/{code}.csv', timeout=40, headers={'User-Agent': 'FutbolFiltri/1.0'})
+            if r.status_code == 200 and len(r.content) > 200:
+                (FDX_DIR / f'{code}.csv').write_bytes(r.content)
+                return code, True
+        except requests.RequestException:
+            pass
+        return code, False
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        got = list(ex.map(one, FDX_CODES))
+    load_data.clear()
+    return sum(1 for _, ok in got if ok), [c for c, ok in got if not ok]
+
+
+def refresh_of():
+    OF_DIR.mkdir(exist_ok=True)
+    jobs = [(s_, c) for s_ in of_seasons() for c in OF_LEAGUES] + [(y_, c) for y_ in of_years() for c in OF_YEAR_LEAGUES]
+    def one(job):
+        s_, c = job
+        try:
+            r = requests.get(f'{OF_BASE}/{s_}/{c}.json', timeout=30, headers={'User-Agent': 'FutbolFiltri/1.0'})
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, dict) and data.get('matches'):
+                    (OF_DIR / f'{s_}_{c}.json').write_text(json.dumps(data), encoding='utf-8')
+                    return True
+            elif r.status_code == 404:
+                return None   # bu mövsüm/liqa üçün fayl yoxdur — normaldır
+        except (requests.RequestException, ValueError):
+            pass
+        return False
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        got = list(ex.map(one, jobs))
+    load_data.clear()
+    return sum(1 for g in got if g), sum(1 for g in got if g is False)
+
+
 def _espn_get(sess, params):
     return sess.get(f'{ESPN_BASE}/{params[0]}/scoreboard', params=params[1], timeout=25)
 
@@ -458,7 +793,14 @@ def _espn_score(v):
     return pd.to_numeric(v, errors='coerce')
 
 
-def _espn_parse(data, default_name):
+def _espn_ht(side):
+    ls = side.get('linescores')
+    if isinstance(ls, list) and len(ls) >= 2 and isinstance(ls[0], dict):
+        return _espn_score(ls[0])
+    return float('nan')
+
+
+def _espn_parse(data, default_name, slug=''):
     """Bir scoreboard cavabından (fixtures, results) sətirləri çıxarır."""
     name = default_name
     try:
@@ -474,12 +816,16 @@ def _espn_parse(data, default_name):
             stype = ev['status']['type']
             dt = pd.to_datetime(ev['date'], utc=True)
             row = {'date': dt.strftime('%Y-%m-%d'), 'time': dt.strftime('%H:%M'),
-                   'home': h['team']['displayName'], 'away': a['team']['displayName'], 'league': name}
+                   'home': h['team']['displayName'], 'away': a['team']['displayName'], 'league': name,
+                   'id': str(ev.get('id', '')), 'slug': slug}
             if stype.get('completed'):
                 fh, fa = _espn_score(h.get('score')), _espn_score(a.get('score'))
                 if pd.isna(fh) or pd.isna(fa):
                     continue
                 row['ft_home'], row['ft_away'] = int(fh), int(fa)
+                hh, ha = _espn_ht(h), _espn_ht(a)
+                if pd.notna(hh) and pd.notna(ha) and hh <= fh and ha <= fa:
+                    row['ht_home'], row['ht_away'] = int(hh), int(ha)
                 res.append(row)
             elif stype.get('name') == 'STATUS_SCHEDULED':
                 fix.append(row)
@@ -498,7 +844,7 @@ def _espn_fetch_league(slug, default_name, start, end):
         probe = _espn_get(sess, (slug, {'dates': end.strftime(fmt), 'limit': 300}))
         if probe.status_code != 200:
             return fix, res, f'{slug} (HTTP {probe.status_code})'
-        f, r, name = _espn_parse(probe.json(), default_name)
+        f, r, name = _espn_parse(probe.json(), default_name, slug)
         fix += f
         res += r
         # Əvvəl tarix aralığı ilə sına; işləməsə gün-gün yüklə.
@@ -513,7 +859,7 @@ def _espn_fetch_league(slug, default_name, start, end):
                 rr = _espn_get(sess, (slug, {'dates': f'{c0.strftime(fmt)}-{c1.strftime(fmt)}', 'limit': 300}))
                 if rr.status_code == 200:
                     range_ok = True
-                    f, r, _ = _espn_parse(rr.json(), name)
+                    f, r, _ = _espn_parse(rr.json(), name, slug)
                     fix += f
                     res += r
                     continue
@@ -522,13 +868,50 @@ def _espn_fetch_league(slug, default_name, start, end):
             while d <= c1:
                 rd = _espn_get(sess, (slug, {'dates': d.strftime(fmt), 'limit': 300}))
                 if rd.status_code == 200:
-                    f, r, _ = _espn_parse(rd.json(), name)
+                    f, r, _ = _espn_parse(rd.json(), name, slug)
                     fix += f
                     res += r
                 d += timedelta(days=1)
     except (requests.RequestException, ValueError) as e:
         return fix, res, f'{slug} ({type(e).__name__})'
     return fix, res, None
+
+
+def _espn_stats(slug, event_id):
+    """Bir oyunun künc və sarı kart sayını ESPN 'summary' endpointindən çıxarır. Tapılmasa boş dict qaytarır."""
+    try:
+        r = requests.get(f'{ESPN_BASE}/{slug}/summary', params={'event': event_id}, timeout=25,
+                         headers={'User-Agent': 'FutbolFiltri/1.0'})
+        if r.status_code != 200:
+            return {}
+        data = r.json()
+    except (requests.RequestException, ValueError):
+        return {}
+    side_of = {}
+    try:
+        for c in data['header']['competitions'][0]['competitors']:
+            side_of[str(c['team']['id'])] = c.get('homeAway')
+    except (KeyError, IndexError, TypeError):
+        pass
+    out = {}
+    for t in (data.get('boxscore') or {}).get('teams', []) or []:
+        side = t.get('homeAway') or side_of.get(str((t.get('team') or {}).get('id')))
+        if side not in ('home', 'away'):
+            continue
+        for stt in t.get('statistics', []) or []:
+            name, label = str(stt.get('name', '')).lower(), str(stt.get('label', '')).lower()
+            val = pd.to_numeric(stt.get('displayValue', stt.get('value')), errors='coerce')
+            if pd.isna(val):
+                continue
+            if name in ('woncorners', 'cornerkicks', 'corners') or 'corner' in label:
+                out.setdefault(f'{side}_corners', int(val))
+            elif name == 'yellowcards' or 'yellow' in label:
+                out.setdefault(f'{side}_yellow', int(val))
+    for a_, b_ in (('home_corners', 'away_corners'), ('home_yellow', 'away_yellow')):
+        if not (a_ in out and b_ in out):
+            out.pop(a_, None)
+            out.pop(b_, None)
+    return out
 
 
 def refresh_espn():
@@ -539,7 +922,7 @@ def refresh_espn():
     start = today_ - timedelta(days=ESPN_DAYS_BACK_FIRST if first else ESPN_DAYS_BACK)
     end = today_ + timedelta(days=ESPN_DAYS_AHEAD)
     all_fix, all_res, failed = [], [], []
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=8) as ex:
         futs = {slug: ex.submit(_espn_fetch_league, slug, name, start, end) for slug, name in ESPN_LEAGUES.items()}
         for slug, fu in futs.items():
             f, r, err = fu.result()
@@ -547,20 +930,42 @@ def refresh_espn():
             all_res += r
             if err:
                 failed.append(err)
-    res_new = pd.DataFrame(all_res)
-    if not res_new.empty and old_res_path.exists():
-        old = read_csv_safe(old_res_path)
-        if old is not None and not old.empty:
-            res_new = pd.concat([res_new, old], ignore_index=True)
-    if not res_new.empty:
-        res_new = res_new.drop_duplicates(subset=['date', 'home', 'away'], keep='first').sort_values('date')
-        res_new.to_csv(old_res_path, index=False)
+    key = ['date', 'home', 'away']
+    res_all = pd.DataFrame(all_res)
+    old = read_csv_safe(old_res_path) if old_res_path.exists() else None
+    if old is not None and not old.empty:
+        old = old.drop_duplicates(subset=key)
+        if res_all.empty:
+            res_all = old
+        else:
+            res_all = res_all.drop_duplicates(subset=key).set_index(key).combine_first(old.set_index(key)).reset_index()
+    stats_done = stats_left = 0
+    if not res_all.empty:
+        for col in ('home_corners', 'away_corners', 'home_yellow', 'away_yellow', 'stats_try', 'id', 'slug'):
+            if col not in res_all.columns:
+                res_all[col] = float('nan')
+        res_all['stats_try'] = pd.to_numeric(res_all['stats_try'], errors='coerce').fillna(0)
+        need = (res_all['id'].notna() & res_all['slug'].notna() & res_all['home_corners'].isna()
+                & (res_all['stats_try'] < ESPN_STATS_MAX_TRIES))
+        pend = res_all[need].sort_values('date', ascending=False).head(ESPN_STATS_PER_REFRESH)
+        stats_left = int(need.sum()) - len(pend)
+        if not pend.empty:
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                got = list(ex.map(lambda t: _espn_stats(t[0], t[1]), zip(pend['slug'], pend['id'])))
+            for idx, st_ in zip(pend.index, got):
+                res_all.at[idx, 'stats_try'] += 1
+                if st_:
+                    stats_done += 1
+                    for k, v in st_.items():
+                        res_all.at[idx, k] = v
+        res_all = res_all.sort_values('date')
+        res_all.to_csv(old_res_path, index=False)
     fix_new = pd.DataFrame(all_fix)
     if not fix_new.empty:
         fix_new = fix_new.drop_duplicates(subset=['date', 'home', 'away']).sort_values(['date', 'time'])
         fix_new.to_csv(ESPN_DIR / 'fixtures.csv', index=False)
     load_data.clear()
-    return len(res_new), len(fix_new), failed
+    return len(res_all), len(fix_new), failed, stats_done, stats_left
 
 
 with st.sidebar:
@@ -584,8 +989,26 @@ with st.sidebar:
             except Exception as e:
                 msgs.append(('error', f'football-data.co.uk yenilənmədi: {e}'))
             try:
-                n_res, n_fix, espn_failed = refresh_espn()
-                msgs.append(('success', f'ESPN: {n_res} nəticə, {n_fix} qarşıdakı oyun.'))
+                ok, failed = refresh_fdx()
+                msgs.append(('success', f'football-data.co.uk (əlavə liqalar): {ok} fayl yükləndi.'))
+                if failed:
+                    msgs.append(('warning', 'Yüklənməyən əlavə liqalar: ' + ', '.join(failed)))
+            except Exception as e:
+                msgs.append(('error', f'football-data.co.uk əlavə liqalar yenilənmədi: {e}'))
+            try:
+                refresh_ir()
+                msgs.append(('success', 'international_results (milli komandalar) yeniləndi.'))
+            except Exception as e:
+                msgs.append(('error', f'international_results yenilənmədi: {e}'))
+            try:
+                ok, bad = refresh_of()
+                msgs.append(('success', f'openfootball: {ok} fayl yükləndi.' + (f' Xətalı: {bad}.' if bad else '')))
+            except Exception as e:
+                msgs.append(('error', f'openfootball yenilənmədi: {e}'))
+            try:
+                n_res, n_fix, espn_failed, st_done, st_left = refresh_espn()
+                msgs.append(('success', f'ESPN: {n_res} nəticə, {n_fix} qarşıdakı oyun. Künc/kart statistikası: {st_done} oyun yükləndi'
+                             + (f', {st_left} oyun növbəti yeniləmədə davam edəcək.' if st_left > 0 else '.')))
                 if espn_failed:
                     msgs.append(('warning', f'ESPN-də yüklənməyən yarışlar ({len(espn_failed)}): ' + ', '.join(espn_failed)))
             except Exception as e:
@@ -607,153 +1030,41 @@ for c in ['ft_home', 'ft_away', 'ht_home', 'ht_away', 'home_corners', 'away_corn
         results[c] = pd.to_numeric(results[c], errors='coerce')
 results = results.dropna(subset=['date', 'home', 'away', 'ft_home', 'ft_away']).copy()
 
-today = pd.Timestamp.now().date()
+today = baku_today()   # Bakı vaxtı ilə bu gün (server UTC olsa belə)
+st.session_state.setdefault('d_from', today)
+st.session_state.setdefault('d_to', today)
 
-# Əlavə səhifə: seçilmiş tarixdə oyunlar və komandaların son nəticələrinə görə faiz analizi.
-page = st.radio('Bölmə seç', ['Əsas analiz', 'Gündəlik oyunlar'], horizontal=True, key='main_page')
-if page == 'Gündəlik oyunlar':
-    st.title('⚽ Gündəlik oyunlar')
-    st.caption('Tarixi seç, bazarları işarələ və oyunları tarixi nəticələr üzrə hesablanan faiz göstəricisinə görə sırala.')
 
-    st.session_state.setdefault('daily_date', today)
-    nav1, nav2, nav3 = st.columns([1, 2, 1])
-    with nav1:
-        if st.button('‹ Əvvəlki gün', use_container_width=True):
-            st.session_state['daily_date'] = st.session_state['daily_date'] - timedelta(days=1)
-            st.rerun()
-    with nav2:
-        chosen_date = st.date_input('Oyun günü', key='daily_date')
-    with nav3:
-        if st.button('Növbəti gün ›', use_container_width=True):
-            st.session_state['daily_date'] = st.session_state['daily_date'] + timedelta(days=1)
-            st.rerun()
-
-    league_options_daily = sorted({str(x) for x in pd.concat([fixtures['league'], results['league']]).dropna() if str(x).strip()})
-    selected_daily_leagues = st.multiselect('Liqalar', league_options_daily, default=league_options_daily, key='daily_leagues')
-
-    st.markdown('### Bazar filtrləri')
-    market_cols = st.columns(3)
-    with market_cols[0]:
-        m_btts = st.checkbox('Qol-qol (BTTS)', value=True, key='daily_btts')
-        m_o25 = st.checkbox('2.5 üst', value=True, key='daily_o25')
-        m_o35 = st.checkbox('3.5 üst', key='daily_o35')
-    with market_cols[1]:
-        m_ht05 = st.checkbox('İlk hissə 0.5 üst', value=True, key='daily_ht05')
-        m_ht15 = st.checkbox('İlk hissə 1.5 üst', key='daily_ht15')
-    with market_cols[2]:
-        m_c75 = st.checkbox('Künc 7.5 üst', key='daily_c75')
-        m_c85 = st.checkbox('Künc 8.5 üst', key='daily_c85')
-        m_c95 = st.checkbox('Künc 9.5 üst', key='daily_c95')
-
-    market_defs = {
-        'Qol-qol': (m_btts, lambda r: (r.get('ft_home', float('nan')) > 0 and r.get('ft_away', float('nan')) > 0) if pd.notna(r.get('ft_home')) and pd.notna(r.get('ft_away')) else None),
-        '2.5 üst': (m_o25, lambda r: (r.get('ft_home') + r.get('ft_away') >= 3) if pd.notna(r.get('ft_home')) and pd.notna(r.get('ft_away')) else None),
-        '3.5 üst': (m_o35, lambda r: (r.get('ft_home') + r.get('ft_away') >= 4) if pd.notna(r.get('ft_home')) and pd.notna(r.get('ft_away')) else None),
-        'İH 0.5 üst': (m_ht05, lambda r: (r.get('ht_home') + r.get('ht_away') >= 1) if pd.notna(r.get('ht_home')) and pd.notna(r.get('ht_away')) else None),
-        'İH 1.5 üst': (m_ht15, lambda r: (r.get('ht_home') + r.get('ht_away') >= 2) if pd.notna(r.get('ht_home')) and pd.notna(r.get('ht_away')) else None),
-        'Künc 7.5 üst': (m_c75, lambda r: (r.get('home_corners') + r.get('away_corners') >= 8) if pd.notna(r.get('home_corners')) and pd.notna(r.get('away_corners')) else None),
-        'Künc 8.5 üst': (m_c85, lambda r: (r.get('home_corners') + r.get('away_corners') >= 9) if pd.notna(r.get('home_corners')) and pd.notna(r.get('away_corners')) else None),
-        'Künc 9.5 üst': (m_c95, lambda r: (r.get('home_corners') + r.get('away_corners') >= 10) if pd.notna(r.get('home_corners')) and pd.notna(r.get('away_corners')) else None),
-    }
-    active_markets = [name for name, (enabled, _) in market_defs.items() if enabled]
-
-    if not active_markets:
-        st.info('Ən azı bir bazar seç.')
+def _shift_dates(days):
+    # days=0 → bu günə (Bakı) qayıt; ±1 → seçilmiş tarix aralığını bir gün geri/irəli sürüşdür və analizi avtomatik işlət
+    if days == 0:
+        st.session_state['d_from'] = st.session_state['d_to'] = baku_today()
     else:
-        d_target = pd.Timestamp(chosen_date)
-        if chosen_date < today:
-            day_games = results[results['date'].dt.normalize() == d_target.normalize()].copy()
-        else:
-            day_games = fixtures[fixtures['date'].dt.normalize() == d_target.normalize()].copy()
-        if selected_daily_leagues:
-            day_games = day_games[day_games['league'].isin(selected_daily_leagues)]
-        else:
-            day_games = day_games.iloc[0:0]
-        if not day_games.empty:
-            day_games = day_games.drop_duplicates(subset=['date', 'home_k', 'away_k']).copy()
+        st.session_state['d_from'] = st.session_state['d_from'] + timedelta(days=days)
+        st.session_state['d_to'] = st.session_state['d_to'] + timedelta(days=days)
+    st.session_state['auto_run'] = True
 
-        def _history(team_key, before_date, side='all', limit=10):
-            if not team_key:
-                return results.iloc[0:0].copy()
-            mask = (results['date'] < before_date) & ((results['home_k'] == team_key) | (results['away_k'] == team_key))
-            if side == 'home':
-                mask &= results['home_k'] == team_key
-            elif side == 'away':
-                mask &= results['away_k'] == team_key
-            return results[mask].sort_values('date', ascending=False).head(limit)
-
-        def _rate(hist, market_name):
-            fn = market_defs[market_name][1]
-            vals = [fn(row) for _, row in hist.iterrows()]
-            vals = [v for v in vals if v is not None]
-            if not vals:
-                return None
-            return round(sum(bool(v) for v in vals) * 100 / len(vals))
-
-        daily_rows = []
-        detail_rows = {}
-        for _, game in day_games.iterrows():
-            match_date = game['date']
-            home_hist10 = _history(game.get('home_k'), match_date, 'all', 10)
-            home_hist5 = _history(game.get('home_k'), match_date, 'home', 5)
-            away_hist10 = _history(game.get('away_k'), match_date, 'all', 10)
-            away_hist5 = _history(game.get('away_k'), match_date, 'away', 5)
-            market_detail = {}
-            market_means = {}
-            all_rates = []
-            for market_name in active_markets:
-                rates = {
-                    'Ev sahibi · son 10': _rate(home_hist10, market_name),
-                    'Ev sahibi · son 5 ev oyunu': _rate(home_hist5, market_name),
-                    'Qonaq · son 10': _rate(away_hist10, market_name),
-                    'Qonaq · son 5 səfər': _rate(away_hist5, market_name),
-                }
-                valid = [v for v in rates.values() if v is not None]
-                avg = round(sum(valid) / len(valid)) if valid else None
-                market_detail[market_name] = rates
-                market_means[market_name] = avg
-                if avg is not None:
-                    all_rates.append(avg)
-            best_rate = max(all_rates) if all_rates else None
-            overall_rate = round(sum(all_rates) / len(all_rates)) if all_rates else None
-            daily_rows.append({
-                'Tarix': match_date.strftime('%d.%m.%Y'),
-                'Saat': str(game.get('time', '') or '').strip(),
-                'Liqa': str(game.get('league', '')),
-                'Ev sahibi': str(game.get('home', '')),
-                'Qonaq': str(game.get('away', '')),
-                **{f'{m} %': (f'{market_means[m]}%' if market_means[m] is not None else 'Məlumat yoxdur') for m in active_markets},
-                'Orta faiz': overall_rate,
-                'Ən yüksək faiz': best_rate,
-            })
-            detail_rows[f"{game.get('home', '')} — {game.get('away', '')}"] = market_detail
-
-        if not daily_rows:
-            st.warning('Seçilmiş tarix və liqalarda oyun tapılmadı. Məlumat bazasını yenilə və ya başqa tarix seç.')
-        else:
-            table = pd.DataFrame(daily_rows)
-            table = table.sort_values(['Orta faiz', 'Ən yüksək faiz'], ascending=False, na_position='last')
-            st.caption('Sıralama seçilmiş bazarların statistik faizlərinin ortalamasına əsaslanır. Faiz keçmiş oyunların göstəricisidir, zəmanətli proqnoz deyil.')
-            st.dataframe(table, hide_index=True, use_container_width=True)
-            st.markdown('### Oyun üzrə ətraflı faizlər')
-            for _, item in table.iterrows():
-                match_label = f"{item['Saat'] if item['Saat'] and item['Saat'].lower() not in ('nan', 'nat', 'none') else 'Saat məlum deyil'} · {item['Ev sahibi']} — {item['Qonaq']}"
-                with st.expander(match_label):
-                    details = detail_rows.get(f"{item['Ev sahibi']} — {item['Qonaq']}", {})
-                    detail_table = []
-                    for market_name, rates in details.items():
-                        detail_table.append({'Bazar': market_name, **{k: (f'{v}%' if v is not None else 'Məlumat yoxdur') for k, v in rates.items()}})
-                    st.dataframe(pd.DataFrame(detail_table), hide_index=True, use_container_width=True)
-            st.download_button('⬇️ Gündəlik siyahını CSV yüklə', table.to_csv(index=False).encode('utf-8-sig'), file_name=f'gunluk_oyunlar_{chosen_date}.csv', mime='text/csv')
-    st.stop()
 
 with st.container(border=True):
     st.markdown('<div class="sec">1 · Tarix və oyun sayı</div>', unsafe_allow_html=True)
+    try:
+        nav_box = st.container(key='datenav')
+    except TypeError:   # köhnə Streamlit versiyası
+        nav_box = st.container()
+    with nav_box:
+        n1, n2, n3 = st.columns([1, 3, 1])
+        n1.button('◀', key='prev_day', on_click=_shift_dates, args=(-1,), use_container_width=True, help='Əvvəlki gün')
+        _df, _dt = st.session_state['d_from'], st.session_state['d_to']
+        _lab = f'📅 {_df:%d.%m.%Y}' if _df == _dt else f'📅 {_df:%d.%m} – {_dt:%d.%m.%Y}'
+        n2.button(_lab + (' · bu gün' if _df == _dt == today else ''), key='today_btn', on_click=_shift_dates, args=(0,),
+                  use_container_width=True, help='Basanda Bakı vaxtı ilə bu günə qayıdır')
+        n3.button('▶', key='next_day', on_click=_shift_dates, args=(1,), use_container_width=True, help='Növbəti gün')
+    st.caption('🕒 Tarix və saatlar Bakı vaxtı ilədir (UTC+4).')
     c1, c2, c3 = st.columns(3)
     with c1:
-        date_from = st.date_input('Başlanğıc tarixi', value=today)
+        date_from = st.date_input('Başlanğıc tarixi', key='d_from')
     with c2:
-        date_to = st.date_input('Son tarix', value=today)
+        date_to = st.date_input('Son tarix', key='d_to')
     with c3:
         n_games = st.number_input('Hər komandanın son neçə oyunu?', min_value=1, max_value=50, value=2, step=1)
     league_options = sorted({str(x) for x in pd.concat([fixtures['league'], results['league']]).dropna() if str(x).strip()})
@@ -818,13 +1129,18 @@ with st.container(border=True):
     with cols[0]:
         st.markdown('**⚽ Qol filtrləri**')
         btts = st.checkbox('BTTS — hər iki komanda qol vurub')
+        btts_no = st.checkbox('BTTS yox — ən azı bir komanda qol vurmayıb')
         over25 = st.checkbox('Matç 2.5 üst')
+        under25 = st.checkbox('Matç 2.5 alt')
         over35 = st.checkbox('Matç 3.5 üst')
         over45 = st.checkbox('Matç 4.5 üst')
     with cols[1]:
         st.markdown('**⏱️ 1-ci hissə**')
         ht05 = st.checkbox('1-ci hissə 0.5 üst')
+        ht05_under = st.checkbox('1-ci hissə 0.5 alt (qol yoxdur)')
         ht15 = st.checkbox('1-ci hissə 1.5 üst')
+        ht15_under = st.checkbox('1-ci hissə 1.5 alt')
+        ht_draw = st.checkbox('1-ci hissə heç-heçə')
     with cols[2]:
         st.markdown('**📊 Statistika**')
         corners_on = st.checkbox('Künc zərbələri minimumu')
@@ -833,36 +1149,109 @@ with st.container(border=True):
         min_cards = st.number_input('Matç üzrə minimum sarı vərəqə', min_value=0, max_value=20, value=3, disabled=not cards_on)
     st.markdown('<div class="rule">Hər komandanın seçilən son oyunlarının <b>HAMISI</b> bütün şərtlərə uyğun olmalıdır.</div>', unsafe_allow_html=True)
 
-criteria_selected = any([btts, ht05, ht15, over25, over35, over45, corners_on, cards_on])
+criteria_selected = any([btts, btts_no, ht05, ht05_under, ht15, ht15_under, ht_draw, over25, under25, over35, over45, corners_on, cards_on])
 if not criteria_selected:
     st.info('Ən azı bir filtr seç. Tarixə uyğun oyunlar aşağıda görünür, analiz üçün isə filtr lazımdır.')
 
-def match_pass(row):
-    checks = []
-    hg, ag = row.get('ft_home'), row.get('ft_away')
-    if pd.isna(hg) or pd.isna(ag):
-        return False
+
+def _num(df, col):
+    return pd.to_numeric(df[col], errors='coerce') if col in df.columns else pd.Series(np.nan, index=df.index)
+
+
+def active_conditions():
+    """Seçilmiş filtrlərin siyahısı: (ad, funksiya). Funksiya DataFrame alıb (şərt ödənir, lazımi məlumat var) qaytarır."""
+    def ft(d):
+        hg, ag = _num(d, 'ft_home'), _num(d, 'ft_away')
+        return hg, ag, hg.notna() & ag.notna()
+
+    def ht(d):
+        a, b = _num(d, 'ht_home'), _num(d, 'ht_away')
+        return a, b, a.notna() & b.notna()
+
+    def total_rule(fn):
+        return lambda d: ((lambda hg, ag, has: (fn(hg + ag), has))(*ft(d)))
+
+    def ht_rule(fn):
+        return lambda d: ((lambda a, b, has: (fn(a, b), has))(*ht(d)))
+
+    conds = []
     if btts:
-        checks.append(hg > 0 and ag > 0)
-    ht_h, ht_a = row.get('ht_home'), row.get('ht_away')
-    if ht05:
-        checks.append(pd.notna(ht_h) and pd.notna(ht_a) and ht_h + ht_a >= 1)
-    if ht15:
-        checks.append(pd.notna(ht_h) and pd.notna(ht_a) and ht_h + ht_a >= 2)
-    total = hg + ag
+        conds.append(('BTTS', lambda d: ((lambda hg, ag, has: ((hg > 0) & (ag > 0), has))(*ft(d)))))
+    if btts_no:
+        conds.append(('BTTS yox', lambda d: ((lambda hg, ag, has: (~((hg > 0) & (ag > 0)), has))(*ft(d)))))
     if over25:
-        checks.append(total >= 3)
+        conds.append(('Matç 2.5 üst', total_rule(lambda t: t >= 3)))
+    if under25:
+        conds.append(('Matç 2.5 alt', total_rule(lambda t: t <= 2)))
     if over35:
-        checks.append(total >= 4)
+        conds.append(('Matç 3.5 üst', total_rule(lambda t: t >= 4)))
     if over45:
-        checks.append(total >= 5)
-    hc, ac = row.get('home_corners'), row.get('away_corners')
+        conds.append(('Matç 4.5 üst', total_rule(lambda t: t >= 5)))
+    if ht05:
+        conds.append(('1-ci hissə 0.5 üst', ht_rule(lambda a, b: a + b >= 1)))
+    if ht05_under:
+        conds.append(('1-ci hissə 0.5 alt', ht_rule(lambda a, b: a + b == 0)))
+    if ht15:
+        conds.append(('1-ci hissə 1.5 üst', ht_rule(lambda a, b: a + b >= 2)))
+    if ht15_under:
+        conds.append(('1-ci hissə 1.5 alt', ht_rule(lambda a, b: a + b <= 1)))
+    if ht_draw:
+        conds.append(('1-ci hissə heç-heçə', ht_rule(lambda a, b: a == b)))
     if corners_on:
-        checks.append(pd.notna(hc) and pd.notna(ac) and hc + ac >= min_corners)
-    hy, ay = row.get('home_yellow'), row.get('away_yellow')
+        def _c(d):
+            a, b = _num(d, 'home_corners'), _num(d, 'away_corners')
+            return a + b >= min_corners, a.notna() & b.notna()
+        conds.append((f'Künc ≥ {int(min_corners)}', _c))
     if cards_on:
-        checks.append(pd.notna(hy) and pd.notna(ay) and hy + ay >= min_cards)
-    return all(checks) if checks else True
+        def _y(d):
+            a, b = _num(d, 'home_yellow'), _num(d, 'away_yellow')
+            return a + b >= min_cards, a.notna() & b.notna()
+        conds.append((f'Sarı vərəqə ≥ {int(min_cards)}', _y))
+    return conds
+
+
+def match_pass_vec(df):
+    """Hər sətir (keçmiş oyun) bütün seçilmiş şərtlərə uyğundurmu? Məlumat çatmırsa uyğun sayılmır."""
+    ok = _num(df, 'ft_home').notna() & _num(df, 'ft_away').notna()
+    for _, fn in active_conditions():
+        p, has = fn(df)
+        ok = ok & p.fillna(False) & has
+    return ok
+
+
+def has_data_vec(df):
+    """Seçilmiş şərtləri yoxlamaq üçün lazımi məlumat (hesab, 1-ci hissə, künc, kart) var?"""
+    ok = _num(df, 'ft_home').notna() & _num(df, 'ft_away').notna()
+    for _, fn in active_conditions():
+        ok = ok & fn(df)[1]
+    return ok
+
+
+def conditions_contradict():
+    """Seçilmiş hesab filtrləri heç bir mümkün hesabla eyni anda ödənə bilməzsə True."""
+    rows = [(hg, ag, a, b) for hg in range(8) for ag in range(8) for a in range(hg + 1) for b in range(ag + 1)]
+    g = pd.DataFrame(rows, columns=['ft_home', 'ft_away', 'ht_home', 'ht_away'])
+    g['home_corners'] = g['away_corners'] = g['home_yellow'] = g['away_yellow'] = 99
+    return not bool(match_pass_vec(g).any())
+
+
+def backtest_qualified(R, n):
+    """R: nəticələr (sütunlar: date, home_k, away_k, flag). Hər oyun üçün: oyundan əvvəl hər iki komandanın son n oyununun HAMISI flag=True idi?
+    (Əsas analizdəki team_last məntiqi ilə eyni, lakin hamısı bir dəfəyə hesablanır.)"""
+    R = R.reset_index(drop=True)
+    L = pd.concat([
+        pd.DataFrame({'rid': R.index, 'team': R['home_k'], 'date': R['date'], 'flag': R['flag'].astype(int), 'side': 'h'}),
+        pd.DataFrame({'rid': R.index, 'team': R['away_k'], 'date': R['date'], 'flag': R['flag'].astype(int), 'side': 'a'}),
+    ], ignore_index=True).sort_values(['team', 'date', 'rid'], kind='stable').reset_index(drop=True)
+    g = L.groupby('team')
+    cs = g['flag'].cumsum()
+    prev = cs.groupby(L['team']).shift(1).fillna(0)
+    old = cs.groupby(L['team']).shift(n + 1).fillna(0)
+    L['ok'] = (g.cumcount() >= n) & ((prev - old) == n)
+    okh = L[L['side'] == 'h'].set_index('rid')['ok'].reindex(R.index).fillna(False)
+    oka = L[L['side'] == 'a'].set_index('rid')['ok'].reindex(R.index).fillna(False)
+    return (okh & oka).values
+
 
 def team_last(team_k, date):
     # Komandanın əvvəlki oyunlarını bütün yarışlardan götür (liqa və kubok). Komanda ad açarı ilə axtarılır.
@@ -874,14 +1263,20 @@ def team_last(team_k, date):
         return None
     return hist
 
-if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=True):
+run_clicked = st.button('🔎 Oyunları analiz et', type='primary', use_container_width=True)
+auto_run = st.session_state.pop('auto_run', False)   # ◀ ▶ düymələri sonrası analiz avtomatik işləyir
+if run_clicked or (auto_run and criteria_selected):
     if date_from > date_to:
         st.error('Başlanğıc tarixi son tarixdən böyük ola bilməz.')
         st.stop()
     if not criteria_selected:
         st.warning('Zəhmət olmasa ən azı bir filtr seç.')
         st.stop()
-    today = pd.Timestamp.now().date()
+    if conditions_contradict():
+        st.warning('Seçilmiş filtrlər bir-birinə ziddir (məsələn "2.5 üst" və "2.5 alt"), heç bir oyun uyğun gəlməyəcək. Filtrləri dəyiş.')
+        st.stop()
+    today = baku_today()
+    results['_pass'] = match_pass_vec(results)   # keçmiş oyunların hər biri filtrə uyğundurmu (bir dəfə hesablanır)
     target_cols = ['date', 'time', 'home', 'away', 'league', 'home_k', 'away_k', 'src']
     fixture_targets = fixtures[
         (fixtures['date'].dt.date >= date_from) &
@@ -922,7 +1317,7 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
             skipped += 1
             progress.progress((i + 1) / len(day_games))
             continue
-        if all(match_pass(r) for _, r in hhist.iterrows()) and all(match_pass(r) for _, r in ahist.iterrows()):
+        if hhist['_pass'].all() and ahist['_pass'].all():
             passed.append({
                 'Tarix': date.strftime('%Y-%m-%d'),
                 'Saat': str(game.get('time', '')),
@@ -944,7 +1339,7 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
         f'</div>',
         unsafe_allow_html=True
     )
-    st.caption('Komandaların əvvəlki oyunları liqa və kubok daxil olmaqla bütün mövcud nəticələrdən, hədəf oyunun tarixindən əvvəl axtarılır.')
+    st.caption('Komandaların əvvəlki oyunları liqa və kubok daxil olmaqla bütün mövcud nəticələrdən, hədəf oyunun tarixindən əvvəl axtarılır. Saatlar Bakı vaxtı ilədir.')
 
     if passed:
         out = pd.DataFrame(passed)
@@ -1002,9 +1397,58 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
     else:
         st.info('Seçilən şərtlərə uyğun oyun tapılmadı. Tarix aralığını genişləndir və ya filtrləri dəyiş.')
 
+with st.expander('📈 Geriyə test — seçilmiş filtr keçmişdə neçə faiz tutub?', expanded=False):
+    st.caption('Keçmiş oyunlara baxılır: oyundan əvvəl hər iki komandanın son N oyunu seçilmiş filtrlərin hamısına uyğun olubsa, həmin oyunun özü də eyni filtrlərə uyğun gəldimi? '
+               'Bu, yuxarıdakı analizin keçmişdəki "faizidir". Keçmiş faiz gələcək nəticəyə zəmanət vermir.')
+    bt_days = st.select_slider('Keçmiş dövr', options=[30, 60, 90, 180, 365], value=180, format_func=lambda d: f'son {d} gün', key='bt_days')
+    if st.button('📈 Geriyə testi işlət', use_container_width=True, key='bt_run'):
+        if not criteria_selected:
+            st.warning('Əvvəl ən azı bir filtr seç.')
+        elif conditions_contradict():
+            st.warning('Seçilmiş filtrlər bir-birinə ziddir.')
+        elif not sel_leagues:
+            st.warning('Heç bir liqa seçilməyib.')
+        else:
+            R = results.copy().reset_index(drop=True)
+            R['flag'] = match_pass_vec(R)
+            R['has'] = has_data_vec(R)
+            R['qual'] = backtest_qualified(R, int(n_games))
+            bt_today = pd.Timestamp(baku_today())
+            period = (R['date'] >= bt_today - pd.Timedelta(days=int(bt_days))) & (R['date'] < bt_today) & R['has']
+            if len(sel_leagues) < len(league_options):
+                period &= R['league'].isin(sel_leagues)
+            E = R[period]
+            Q = E[E['qual']]
+            if E.empty:
+                st.info('Bu dövrdə seçilmiş liqalarda yoxlanıla bilən oyun yoxdur.')
+            elif Q.empty:
+                st.info(f'Son {int(bt_days)} gündə hər iki komandanın son {int(n_games)} oyunu bütün şərtlərə uyğun gələn oyun tapılmadı. Oyun sayını azalt və ya filtrləri yüngülləşdir.')
+            else:
+                hits = int(Q['flag'].sum())
+                base = float(E['flag'].mean())
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric('Filtrə uyğun oyun', len(Q))
+                m2.metric('Özü də uyğun gəldi', hits)
+                m3.metric('Keçmiş faiz', f'{hits / len(Q) * 100:.1f}%')
+                m4.metric('Baza faizi', f'{base * 100:.1f}%', help='Eyni şərtlərin tarixçəsinə baxmadan bütün oyunlarda ödənmə faizi')
+                lift = hits / len(Q) - base
+                st.caption(f'Yoxlanılan oyun: {len(E)} · filtr baza faizinə nisbətən {lift * 100:+.1f} faiz bəndi fərq yaradıb.'
+                           + (' ⚠️ Nümunə kiçikdir (30-dan az oyun), nəticəyə etibar etmə.' if len(Q) < 30 else ''))
+                conds = active_conditions()
+                if len(conds) > 1:
+                    rows = [{'Şərt': name, 'Faiz': round(float((fn(Q)[0] & fn(Q)[1]).mean() * 100), 1)} for name, fn in conds]
+                    st.markdown('**Şərtlər üzrə (uyğun oyunlarda ayrı-ayrılıqda)**')
+                    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+                by = Q.groupby('league').agg(Oyun=('flag', 'size'), Uyğun=('flag', 'sum')).reset_index()
+                by['Faiz'] = (by['Uyğun'] / by['Oyun'] * 100).round(1)
+                by = by.rename(columns={'league': 'Liqa'}).sort_values(['Oyun', 'Faiz'], ascending=False).head(20)
+                st.markdown('**Liqa üzrə (ən çox oyun olan 20)**')
+                st.dataframe(by, hide_index=True, use_container_width=True)
+
 with st.expander('Məlumat bazası haqqında'):
     st.write(f'Çempionat qovluqları: {len(list(DATA_DIR.iterdir())) if DATA_DIR.exists() else 0}. Qarşıdakı oyun sətri: {len(fixtures)}. Tarixi nəticə sətri: {len(results)}. Siyahıdakı liqa sayı: {len(league_options)}.')
-    st.write('Mənbələr: Open Matchday — https://github.com/oladeeayo/open-matchday, football-data.co.uk və ESPN (qitə kubokları: AFC, CAF, Libertadores və s.). Eyni oyun bir neçə mənbədə varsa statistika üçün əvvəlcə football-data.co.uk, sonra Open Matchday, sonra ESPN götürülür. Statistikası olmayan oyunlar müvafiq statistik filtrdə uyğun sayılmır.')
+    st.write('Mənbələr: Open Matchday — https://github.com/oladeeayo/open-matchday, football-data.co.uk (əsas və əlavə liqalar), openfootball (https://github.com/openfootball/football.json), international_results (https://github.com/martj42/international_results, milli komandalar) və ESPN (qitə kubokları, daxili kuboklar və onlarla liqa; yarımvaxt, künc və sarı kart ESPN-dən də çıxarılır). Eyni oyun bir neçə mənbədə varsa statistika üçün əvvəlcə football-data.co.uk, sonra Open Matchday, sonra openfootball, sonra ESPN götürülür. Statistikası olmayan oyunlar müvafiq statistik filtrdə uyğun sayılmır.')
+    st.write(f'Əlavə liqa faylları (football-data.co.uk/new): {len(list(FDX_DIR.glob("*.csv"))) if FDX_DIR.exists() else 0}. openfootball faylları: {len(list(OF_DIR.glob("*.json"))) if OF_DIR.exists() else 0}.')
     if FD_DIR.exists() and any(FD_DIR.glob('*.csv')):
         st.write(f'football-data.co.uk faylları: {len(list(FD_DIR.glob("*.csv")))}.')
     else:
