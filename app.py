@@ -65,8 +65,63 @@ def team_key(name):
 
 
 st.set_page_config(page_title='Futbol Filtri v6', page_icon='⚽', layout='wide')
-st.title('⚽ Futbol Filtri v6 — Yerli baza')
-st.caption('Oyunları yerli CSV bazasında analiz edir (Open Matchday + football-data.co.uk). API açarı tələb etmir. Statistikası olmayan oyunlar seçilmiş statistik filtrləri keçmiş sayılmır.')
+
+CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+html, body, [class*="css"], .stMarkdown, button, input { font-family: 'Inter', sans-serif; }
+.block-container { padding-top: 1.4rem; max-width: 1180px; }
+header[data-testid="stHeader"] { background: transparent; }
+
+.hero { background: linear-gradient(135deg, #0f766e 0%, #15803d 55%, #166534 100%);
+        border-radius: 18px; padding: 26px 30px; color: #fff; margin-bottom: 20px;
+        box-shadow: 0 10px 30px rgba(21,128,61,.25); }
+.hero h1 { margin: 0; font-size: 28px; font-weight: 800; color: #fff; padding: 0; }
+.hero p { margin: 6px 0 0; opacity: .92; font-size: 14px; max-width: 760px; }
+.hero .tags span { display: inline-block; background: rgba(255,255,255,.18); border-radius: 999px;
+                   padding: 3px 12px; font-size: 12px; margin: 12px 6px 0 0; }
+
+.sec { font-size: 12px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+       opacity: .6; margin: 2px 0 6px; }
+.rule { border: 1px dashed rgba(22,163,74,.55); background: rgba(22,163,74,.08); color: inherit;
+        border-radius: 12px; padding: 10px 14px; font-size: 13.5px; margin: 10px 0 4px; }
+
+div[data-testid="stVerticalBlockBorderWrapper"] { border-radius: 16px; }
+button[kind="primary"] { border-radius: 12px; font-weight: 700; padding: .65rem 1rem;
+                         background: linear-gradient(135deg, #16a34a, #0f766e); border: none; }
+button[kind="primary"]:hover { filter: brightness(1.06); }
+div[data-testid="stExpander"] { border-radius: 14px; border: 1px solid rgba(128,128,128,.28); margin-bottom: 8px; }
+section[data-testid="stSidebar"] .stButton button { border-radius: 10px; font-weight: 600; }
+
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 16px 0 6px; }
+.stat { border: 1px solid rgba(128,128,128,.28); border-radius: 14px; padding: 14px 18px;
+        background: rgba(128,128,128,.07); }
+.stat .n { font-size: 28px; font-weight: 800; line-height: 1.1; }
+.stat .l { font-size: 12px; opacity: .65; margin-top: 3px; }
+.stat.good .n { color: #16a34a; }
+
+.team-head { font-weight: 700; font-size: 15px; margin: 2px 0 8px; }
+.mcard { border: 1px solid rgba(128,128,128,.28); border-radius: 12px; padding: 10px 12px;
+         margin: 6px 0 8px; background: rgba(128,128,128,.07); text-align: center; }
+.mcard .d { font-size: 11.5px; opacity: .6; }
+.mcard .t { font-size: 13px; overflow-wrap: anywhere; }
+.mcard .s { font-size: 21px; font-weight: 800; margin: 2px 0; }
+.chip { display: inline-block; font-size: 11px; padding: 2px 9px; border-radius: 999px; margin: 5px 3px 0; font-weight: 600; }
+.chip.h { background: rgba(168,85,247,.16); color: #9333ea; }
+.chip.c { background: rgba(59,130,246,.16); color: #2563eb; }
+.chip.y { background: rgba(234,179,8,.20); color: #b45309; }
+.chip.s { background: rgba(100,116,139,.18); color: inherit; opacity: .85; }
+
+@media (max-width: 700px) { .stats { grid-template-columns: 1fr; } .hero h1 { font-size: 22px; } }
+</style>
+"""
+st.markdown(CSS, unsafe_allow_html=True)
+st.markdown(
+    '<div class="hero"><h1>⚽ Futbol Filtri</h1>'
+    '<p>Hər komandanın son oyunlarını yoxlayır və bütün seçilmiş şərtlərə uyğun gələn matçları tapır.</p>'
+    '<div class="tags"><span>Open Matchday</span><span>football-data.co.uk</span><span>API açarı lazım deyil</span></div></div>',
+    unsafe_allow_html=True
+)
 
 
 def read_csv_safe(path):
@@ -110,10 +165,18 @@ def load_fd():
             pd.concat(res, ignore_index=True) if res else pd.DataFrame())
 
 
-def add_keys(df):
+SRC_LABELS = {'FD': 'football-data.co.uk', 'OM': 'Open Matchday', 'FD+OM': 'football-data.co.uk + Open Matchday'}
+
+
+def src_label(code):
+    return SRC_LABELS.get(str(code), '')
+
+
+def add_keys(df, src):
     if df.empty:
         return df
     df = df.copy()
+    df['src'] = src
     df['date'] = pd.to_datetime(df.get('date'), errors='coerce').dt.normalize()
     df['home_k'] = df['home'].map(team_key)
     df['away_k'] = df['away'].map(team_key)
@@ -122,7 +185,7 @@ def add_keys(df):
 
 def merge_sources(fd, om):
     """Eyni oyun (tarix + komanda) iki mənbədə varsa birləşdirir: statistika üçün əvvəlcə football-data.co.uk, boşluğu Open Matchday doldurur."""
-    fd, om = add_keys(fd), add_keys(om)
+    fd, om = add_keys(fd, 'FD'), add_keys(om, 'OM')
     if fd.empty:
         return om, []
     if om.empty:
@@ -136,7 +199,9 @@ def merge_sources(fd, om):
         fd_names.update(dict(zip(fd[side + '_k'], fd[side])))
     fd_only = sorted(n for k, n in fd_names.items() if k not in om_keys)
     both = pd.concat([fd, om], ignore_index=True).dropna(subset=['date', 'home_k', 'away_k'])
-    merged = both.groupby(['date', 'home_k', 'away_k'], as_index=False, sort=False).first()
+    agg = {c: 'first' for c in both.columns if c not in ('date', 'home_k', 'away_k', 'src')}
+    agg['src'] = lambda x: '+'.join(sorted(set(x)))
+    merged = both.groupby(['date', 'home_k', 'away_k'], as_index=False, sort=False).agg(agg)
     merged['home'] = merged['home_k'].map(names).fillna(merged['home'])
     merged['away'] = merged['away_k'].map(names).fillna(merged['away'])
     return merged, fd_only
@@ -250,34 +315,37 @@ for c in ['ft_home', 'ft_away', 'ht_home', 'ht_away', 'home_corners', 'away_corn
         results[c] = pd.to_numeric(results[c], errors='coerce')
 results = results.dropna(subset=['date', 'home', 'away', 'ft_home', 'ft_away']).copy()
 
-st.subheader('Axtarış şərtləri')
-c1, c2, c3 = st.columns(3)
 today = pd.Timestamp.now().date()
-with c1:
-    date_from = st.date_input('Başlanğıc tarixi', value=today)
-with c2:
-    date_to = st.date_input('Son tarix', value=today)
-with c3:
-    n_games = st.number_input('Hər komandanın son neçə oyununu yoxlayaq?', min_value=1, max_value=50, value=2, step=1)
-st.markdown('**Hər komandanın seçilən son oyunlarının HAMISI şərtlərə uyğun olmalıdır.**')
-cols = st.columns(4)
-with cols[0]:
-    btts = st.checkbox('BTTS — hər iki komanda qol vurub')
-    ht05 = st.checkbox('1-ci hissə 0.5 üst')
-with cols[1]:
-    ht15 = st.checkbox('1-ci hissə 1.5 üst')
-    over25 = st.checkbox('Matç 2.5 üst')
-with cols[2]:
-    over35 = st.checkbox('Matç 3.5 üst')
-    over45 = st.checkbox('Matç 4.5 üst')
-with cols[3]:
-    corners_on = st.checkbox('Künc zərbələri minimumu')
-    cards_on = st.checkbox('Sarı vərəqə minimumu')
-c4, c5 = st.columns(2)
-with c4:
-    min_corners = st.number_input('Matç üzrə minimum ümumi künc', min_value=0, max_value=30, value=9, disabled=not corners_on)
-with c5:
-    min_cards = st.number_input('Matç üzrə minimum sarı vərəqə', min_value=0, max_value=20, value=3, disabled=not cards_on)
+with st.container(border=True):
+    st.markdown('<div class="sec">1 · Tarix və oyun sayı</div>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        date_from = st.date_input('Başlanğıc tarixi', value=today)
+    with c2:
+        date_to = st.date_input('Son tarix', value=today)
+    with c3:
+        n_games = st.number_input('Hər komandanın son neçə oyunu?', min_value=1, max_value=50, value=2, step=1)
+
+with st.container(border=True):
+    st.markdown('<div class="sec">2 · Filtrlər</div>', unsafe_allow_html=True)
+    cols = st.columns(3)
+    with cols[0]:
+        st.markdown('**⚽ Qol filtrləri**')
+        btts = st.checkbox('BTTS — hər iki komanda qol vurub')
+        over25 = st.checkbox('Matç 2.5 üst')
+        over35 = st.checkbox('Matç 3.5 üst')
+        over45 = st.checkbox('Matç 4.5 üst')
+    with cols[1]:
+        st.markdown('**⏱️ 1-ci hissə**')
+        ht05 = st.checkbox('1-ci hissə 0.5 üst')
+        ht15 = st.checkbox('1-ci hissə 1.5 üst')
+    with cols[2]:
+        st.markdown('**📊 Statistika**')
+        corners_on = st.checkbox('Künc zərbələri minimumu')
+        min_corners = st.number_input('Matç üzrə minimum ümumi künc', min_value=0, max_value=30, value=9, disabled=not corners_on)
+        cards_on = st.checkbox('Sarı vərəqə minimumu')
+        min_cards = st.number_input('Matç üzrə minimum sarı vərəqə', min_value=0, max_value=20, value=3, disabled=not cards_on)
+    st.markdown('<div class="rule">Hər komandanın seçilən son oyunlarının <b>HAMISI</b> bütün şərtlərə uyğun olmalıdır.</div>', unsafe_allow_html=True)
 
 criteria_selected = any([btts, ht05, ht15, over25, over35, over45, corners_on, cards_on])
 if not criteria_selected:
@@ -328,7 +396,7 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
         st.warning('Zəhmət olmasa ən azı bir filtr seç.')
         st.stop()
     today = pd.Timestamp.now().date()
-    target_cols = ['date', 'time', 'home', 'away', 'league', 'home_k', 'away_k']
+    target_cols = ['date', 'time', 'home', 'away', 'league', 'home_k', 'away_k', 'src']
     fixture_targets = fixtures[
         (fixtures['date'].dt.date >= date_from) &
         (fixtures['date'].dt.date <= date_to) &
@@ -367,6 +435,7 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
                 'Tarix': date.strftime('%Y-%m-%d'),
                 'Saat': str(game.get('time', '')),
                 'Çempionat': league,
+                'Mənbə': src_label(game.get('src', '')),
                 'Ev sahibi': home,
                 'Qonaq': away,
                 'Son oyun sayı': int(n_games),
@@ -375,7 +444,14 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
             })
         progress.progress((i + 1) / len(day_games))
     progress.empty()
-    st.success(f'Yoxlanılan oyun: {len(day_games)} · Uyğun oyun: {len(passed)} · Tarixi çatmayan/az olan oyun: {skipped}')
+    st.markdown(
+        f'<div class="stats">'
+        f'<div class="stat"><div class="n">{len(day_games)}</div><div class="l">Yoxlanılan oyun</div></div>'
+        f'<div class="stat good"><div class="n">{len(passed)}</div><div class="l">Uyğun oyun</div></div>'
+        f'<div class="stat"><div class="n">{skipped}</div><div class="l">Tarixçəsi çatmayan oyun</div></div>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
     st.caption('Komandaların əvvəlki oyunları liqa və kubok daxil olmaqla bütün mövcud nəticələrdən, hədəf oyunun tarixindən əvvəl axtarılır.')
 
     if passed:
@@ -389,14 +465,14 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
             league_text = str(item.get('Çempionat', '')).replace('_', ' ').replace('-', ' ').strip()
             title = f"⚽ {item['Tarix']} · {time_text} · {item['Ev sahibi']} — {item['Qonaq']}"
             with st.expander(title, expanded=False):
-                st.caption(f"{league_text} · Hər komandanın son {item['Son oyun sayı']} oyunu")
+                st.caption(f"{league_text} · Hər komandanın son {item['Son oyun sayı']} oyunu · Mənbə: {item['Mənbə'] or 'məlum deyil'}")
                 left, right = st.columns(2)
                 for col, team_name, history_key in [
                     (left, item['Ev sahibi'], 'Ev sahibinin əvvəlki nəticələri'),
                     (right, item['Qonaq'], 'Qonağın əvvəlki nəticələri')
                 ]:
                     with col:
-                        st.markdown(f'**🏟️ {team_name}**')
+                        st.markdown(f'<div class="team-head">🏟️ {team_name}</div>', unsafe_allow_html=True)
                         history = item[history_key]
                         for old_match in history:
                             old_date = pd.to_datetime(old_match.get('date'), errors='coerce')
@@ -407,12 +483,26 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
                             hg, ag = old_match.get('ft_home'), old_match.get('ft_away')
                             score = f'{int(hg)}–{int(ag)}' if pd.notna(hg) and pd.notna(ag) else 'Hesab yoxdur'
                             old_home, old_away = str(old_match.get('home', '')), str(old_match.get('away', ''))
+                            chips = ''
+                            hth, hta = old_match.get('ht_home'), old_match.get('ht_away')
+                            if pd.notna(hth) and pd.notna(hta):
+                                chips += f'<span class="chip h">1-ci hissə {int(hth)}–{int(hta)}</span>'
+                            hcn, acn = old_match.get('home_corners'), old_match.get('away_corners')
+                            if pd.notna(hcn) and pd.notna(acn):
+                                chips += f'<span class="chip c">Künc {int(hcn + acn)}</span>'
+                            hyc, ayc = old_match.get('home_yellow'), old_match.get('away_yellow')
+                            if pd.notna(hyc) and pd.notna(ayc):
+                                chips += f'<span class="chip y">Sarı {int(hyc + ayc)}</span>'
+                            src_text = src_label(old_match.get('src', ''))
+                            if src_text:
+                                chips += f'<span class="chip s">{src_text}</span>'
                             st.markdown(
-                                f'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;margin:5px 0 7px 0;text-align:center;">'
-                                f'<div style="color:#64748b;font-size:12px;">{date_text}{(" · " + old_time) if old_time else ""}</div>'
-                                f'<div style="font-size:13px;overflow-wrap:anywhere;">{old_home}</div>'
-                                f'<div style="font-size:19px;font-weight:700;">{score}</div>'
-                                f'<div style="font-size:13px;overflow-wrap:anywhere;">{old_away}</div></div>',
+                                f'<div class="mcard">'
+                                f'<div class="d">{date_text}{(" · " + old_time) if old_time else ""}</div>'
+                                f'<div class="t">{old_home}</div>'
+                                f'<div class="s">{score}</div>'
+                                f'<div class="t">{old_away}</div>'
+                                f'<div>{chips}</div></div>',
                                 unsafe_allow_html=True
                             )
         out = out.drop(columns=['Ev sahibinin əvvəlki nəticələri', 'Qonağın əvvəlki nəticələri'])
