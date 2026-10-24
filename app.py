@@ -73,12 +73,11 @@ results = results.dropna(subset=['date','home','away','ft_home','ft_away']).copy
 
 st.subheader('Axtarış şərtləri')
 c1,c2,c3 = st.columns(3)
-min_date = fixtures['date'].dropna().min().date() if fixtures['date'].notna().any() else pd.Timestamp.today().date()
-max_date = fixtures['date'].dropna().max().date() if fixtures['date'].notna().any() else pd.Timestamp.today().date()
+today = pd.Timestamp.now().date()
 with c1:
-    date_from = st.date_input('Başlanğıc tarixi', value=min_date)
+    date_from = st.date_input('Başlanğıc tarixi', value=today)
 with c2:
-    date_to = st.date_input('Son tarix', value=max_date)
+    date_to = st.date_input('Son tarix', value=today)
 with c3:
     n_games = st.number_input('Hər komandanın son neçə oyununu yoxlayaq?', min_value=1, max_value=50, value=2, step=1)
 
