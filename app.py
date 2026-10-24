@@ -2,6 +2,8 @@ from pathlib import Path
 import zipfile, io, re, unicodedata, requests, shutil, tempfile
 from datetime import datetime
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 import pandas as pd
 import streamlit as st
 
@@ -30,6 +32,27 @@ FD_RENAME = {
 }
 FD_KEEP = ['date', 'time', 'home', 'away', 'league', 'ft_home', 'ft_away', 'ht_home', 'ht_away',
            'home_corners', 'away_corners', 'home_yellow', 'away_yellow']
+
+# ---- ESPN (üçüncü mənbə: qitə kubokları və Open Matchday-də olmayan yarışlar) ----
+# API açarı lazım deyil. Rəsmi olmayan ictimai endpointdir, gələcəkdə dəyişə bilər.
+ESPN_DIR = ROOT / 'espn-data'
+ESPN_BASE = 'https://site.api.espn.com/apis/site/v2/sports/soccer'
+# Açar: ESPN liqa kodu (slug). Dəyər: ESPN cavabında ad gəlməzsə istifadə olunan ad.
+# Yeni yarış əlavə etmək üçün espn.com-da liqanın səhifəsinin URL-indəki kodu bura yaz.
+# Kod yanlışdırsa, "Məlumatı yenilə"dən sonra sol paneldə xəbərdarlıq görünəcək.
+ESPN_LEAGUES = {
+    'afc.champions': 'AFC Champions League Elite',
+    'afc.cup': 'AFC Champions League Two',
+    'caf.champions': 'CAF Champions League',
+    'caf.confed': 'CAF Confederation Cup',
+    'conmebol.libertadores': 'Copa Libertadores',
+    'conmebol.sudamericana': 'Copa Sudamericana',
+    'concacaf.champions': 'CONCACAF Champions Cup',
+    'concacaf.leagues.cup': 'Leagues Cup',
+}
+ESPN_DAYS_BACK_FIRST = 60   # ilk yükləmədə neçə gün geriyə
+ESPN_DAYS_BACK = 14         # sonrakı yeniləmələrdə (köhnə nəticələr faylda saxlanılır)
+ESPN_DAYS_AHEAD = 21        # neçə gün irəliyə (qarşıdakı oyunlar)
 
 # Komanda adlarını iki mənbədə eyniləşdirmək üçün. Açar: təmizlənmiş ad (kiçik hərf, durğusuz).
 # Uyğunlaşmayan komanda görsən, bura əlavə et: 'mənbədəki ad': 'ortaq ad'
@@ -156,7 +179,7 @@ st.markdown(CSS, unsafe_allow_html=True)
 st.markdown(
     '<div class="hero"><h1>⚽ Futbol Filtri</h1>'
     '<p>Hər komandanın son oyunlarını yoxlayır və bütün seçilmiş şərtlərə uyğun gələn matçları tapır.</p>'
-    '<div class="tags"><span>Open Matchday</span><span>football-data.co.uk</span><span>API açarı lazım deyil</span></div></div>',
+    '<div class="tags"><span>Open Matchday</span><span>football-data.co.uk</span><span>ESPN</span><span>API açarı lazım deyil</span></div></div>',
     unsafe_allow_html=True
 )
 
@@ -202,11 +225,12 @@ def load_fd():
             pd.concat(res, ignore_index=True) if res else pd.DataFrame())
 
 
-SRC_LABELS = {'FD': 'football-data.co.uk', 'OM': 'Open Matchday', 'FD+OM': 'football-data.co.uk + Open Matchday'}
+SRC_LABELS = {'FD': 'football-data.co.uk', 'OM': 'Open Matchday', 'ES': 'ESPN'}
 
 
 def src_label(code):
-    return SRC_LABELS.get(str(code), '')
+    parts = [SRC_LABELS[p] for p in str(code).split('+') if p in SRC_LABELS]
+    return ' + '.join(parts)
 
 
 def add_keys(df, src):
@@ -290,6 +314,29 @@ def pretty_league(name):
     return t.title() if t.islower() else t
 
 
+def load_espn():
+    out = []
+    for name in ('fixtures', 'results'):
+        df = read_csv_safe(ESPN_DIR / f'{name}.csv') if (ESPN_DIR / f'{name}.csv').exists() else None
+        if df is None or df.empty or not {'date', 'home', 'away'} <= set(df.columns):
+            out.append(pd.DataFrame())
+        else:
+            out.append(df)
+    return out[0], out[1]
+
+
+def combine_sources(primary, secondary):
+    """Eyni oyun (tarix + komanda açarı) iki cədvəldə varsa birləşdirir; boş xanaları ikinci cədvəl doldurur."""
+    if secondary.empty:
+        return primary
+    if primary.empty:
+        return secondary
+    both = pd.concat([primary, secondary], ignore_index=True).dropna(subset=['date', 'home_k', 'away_k'])
+    agg = {c: 'first' for c in both.columns if c not in ('date', 'home_k', 'away_k', 'src')}
+    agg['src'] = lambda x: '+'.join(sorted(set('+'.join(x).split('+'))))
+    return both.groupby(['date', 'home_k', 'away_k'], as_index=False, sort=False).agg(agg)
+
+
 def merge_sources(fd, om):
     """Eyni oyun (tarix + komanda) iki mənbədə varsa birləşdirir: statistika üçün əvvəlcə football-data.co.uk, boşluğu Open Matchday doldurur.
     fd və om artıq add_keys + apply_key_map-dən keçmiş olmalıdır."""
@@ -329,6 +376,9 @@ def load_data():
             results.append(df)
     om_fix = add_keys(pd.concat(fixtures, ignore_index=True) if fixtures else pd.DataFrame(), 'OM')
     om_res = add_keys(pd.concat(results, ignore_index=True) if results else pd.DataFrame(), 'OM')
+    es_fix, es_res = load_espn()
+    om_fix = combine_sources(om_fix, add_keys(es_fix, 'ES'))
+    om_res = combine_sources(om_res, add_keys(es_res, 'ES'))
     fd_fix, fd_res = load_fd()
     fd_fix, fd_res = add_keys(fd_fix, 'FD'), add_keys(fd_res, 'FD')
     fd_all = pd.concat([x for x in (fd_res, fd_fix) if not x.empty], ignore_index=True) if (not fd_res.empty or not fd_fix.empty) else pd.DataFrame()
@@ -398,6 +448,121 @@ def refresh_fd():
     return ok, failed
 
 
+def _espn_get(sess, params):
+    return sess.get(f'{ESPN_BASE}/{params[0]}/scoreboard', params=params[1], timeout=25)
+
+
+def _espn_score(v):
+    if isinstance(v, dict):
+        v = v.get('displayValue', v.get('value'))
+    return pd.to_numeric(v, errors='coerce')
+
+
+def _espn_parse(data, default_name):
+    """Bir scoreboard cavabından (fixtures, results) sətirləri çıxarır."""
+    name = default_name
+    try:
+        name = data['leagues'][0].get('name') or default_name
+    except (KeyError, IndexError, TypeError, AttributeError):
+        pass
+    fix, res = [], []
+    for ev in data.get('events', []) or []:
+        try:
+            comp = ev['competitions'][0]
+            sides = {c['homeAway']: c for c in comp['competitors']}
+            h, a = sides['home'], sides['away']
+            stype = ev['status']['type']
+            dt = pd.to_datetime(ev['date'], utc=True)
+            row = {'date': dt.strftime('%Y-%m-%d'), 'time': dt.strftime('%H:%M'),
+                   'home': h['team']['displayName'], 'away': a['team']['displayName'], 'league': name}
+            if stype.get('completed'):
+                fh, fa = _espn_score(h.get('score')), _espn_score(a.get('score'))
+                if pd.isna(fh) or pd.isna(fa):
+                    continue
+                row['ft_home'], row['ft_away'] = int(fh), int(fa)
+                res.append(row)
+            elif stype.get('name') == 'STATUS_SCHEDULED':
+                fix.append(row)
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+    return fix, res, name
+
+
+def _espn_fetch_league(slug, default_name, start, end):
+    """Bir liqa üçün tarix aralığını yükləyir. Qaytarır: (fix, res, xəta_mətni_və_ya_None)."""
+    sess = requests.Session()
+    sess.headers['User-Agent'] = 'FutbolFiltri/1.0'
+    fix, res = [], []
+    fmt = '%Y%m%d'
+    try:
+        probe = _espn_get(sess, (slug, {'dates': end.strftime(fmt), 'limit': 300}))
+        if probe.status_code != 200:
+            return fix, res, f'{slug} (HTTP {probe.status_code})'
+        f, r, name = _espn_parse(probe.json(), default_name)
+        fix += f
+        res += r
+        # Əvvəl tarix aralığı ilə sına; işləməsə gün-gün yüklə.
+        chunks, cur = [], start
+        while cur <= end:
+            nxt = min(cur + timedelta(days=13), end)
+            chunks.append((cur, nxt))
+            cur = nxt + timedelta(days=1)
+        range_ok = None
+        for c0, c1 in chunks:
+            if range_ok is not False:
+                rr = _espn_get(sess, (slug, {'dates': f'{c0.strftime(fmt)}-{c1.strftime(fmt)}', 'limit': 300}))
+                if rr.status_code == 200:
+                    range_ok = True
+                    f, r, _ = _espn_parse(rr.json(), name)
+                    fix += f
+                    res += r
+                    continue
+                range_ok = False
+            d = c0
+            while d <= c1:
+                rd = _espn_get(sess, (slug, {'dates': d.strftime(fmt), 'limit': 300}))
+                if rd.status_code == 200:
+                    f, r, _ = _espn_parse(rd.json(), name)
+                    fix += f
+                    res += r
+                d += timedelta(days=1)
+    except (requests.RequestException, ValueError) as e:
+        return fix, res, f'{slug} ({type(e).__name__})'
+    return fix, res, None
+
+
+def refresh_espn():
+    ESPN_DIR.mkdir(exist_ok=True)
+    old_res_path = ESPN_DIR / 'results.csv'
+    first = not old_res_path.exists()
+    today_ = datetime.utcnow().date()
+    start = today_ - timedelta(days=ESPN_DAYS_BACK_FIRST if first else ESPN_DAYS_BACK)
+    end = today_ + timedelta(days=ESPN_DAYS_AHEAD)
+    all_fix, all_res, failed = [], [], []
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futs = {slug: ex.submit(_espn_fetch_league, slug, name, start, end) for slug, name in ESPN_LEAGUES.items()}
+        for slug, fu in futs.items():
+            f, r, err = fu.result()
+            all_fix += f
+            all_res += r
+            if err:
+                failed.append(err)
+    res_new = pd.DataFrame(all_res)
+    if not res_new.empty and old_res_path.exists():
+        old = read_csv_safe(old_res_path)
+        if old is not None and not old.empty:
+            res_new = pd.concat([res_new, old], ignore_index=True)
+    if not res_new.empty:
+        res_new = res_new.drop_duplicates(subset=['date', 'home', 'away'], keep='first').sort_values('date')
+        res_new.to_csv(old_res_path, index=False)
+    fix_new = pd.DataFrame(all_fix)
+    if not fix_new.empty:
+        fix_new = fix_new.drop_duplicates(subset=['date', 'home', 'away']).sort_values(['date', 'time'])
+        fix_new.to_csv(ESPN_DIR / 'fixtures.csv', index=False)
+    load_data.clear()
+    return len(res_new), len(fix_new), failed
+
+
 with st.sidebar:
     st.header('Məlumat bazası')
     if 'refresh_msgs' in st.session_state:
@@ -418,6 +583,13 @@ with st.sidebar:
                     msgs.append(('warning', f'Yüklənməyən fayllar ({len(failed)}): ' + ', '.join(failed[:15])))
             except Exception as e:
                 msgs.append(('error', f'football-data.co.uk yenilənmədi: {e}'))
+            try:
+                n_res, n_fix, espn_failed = refresh_espn()
+                msgs.append(('success', f'ESPN: {n_res} nəticə, {n_fix} qarşıdakı oyun.'))
+                if espn_failed:
+                    msgs.append(('warning', f'ESPN-də yüklənməyən yarışlar ({len(espn_failed)}): ' + ', '.join(espn_failed)))
+            except Exception as e:
+                msgs.append(('error', f'ESPN yenilənmədi: {e}'))
         st.session_state['refresh_msgs'] = msgs
         st.rerun()
     st.caption('Yeniləmə internet tələb edir. Əvvəl yüklənmiş məlumatlar internet olmadan da analiz edilə bilər.')
@@ -693,11 +865,15 @@ if st.button('🔎 Oyunları analiz et', type='primary', use_container_width=Tru
 
 with st.expander('Məlumat bazası haqqında'):
     st.write(f'Çempionat qovluqları: {len(list(DATA_DIR.iterdir())) if DATA_DIR.exists() else 0}. Qarşıdakı oyun sətri: {len(fixtures)}. Tarixi nəticə sətri: {len(results)}. Siyahıdakı liqa sayı: {len(league_options)}.')
-    st.write('Mənbələr: Open Matchday — https://github.com/oladeeayo/open-matchday və football-data.co.uk. Eyni oyun iki mənbədə varsa statistika üçün əvvəlcə football-data.co.uk götürülür, çatışmayanı Open Matchday doldurur. Statistikası olmayan oyunlar müvafiq statistik filtrdə uyğun sayılmır.')
+    st.write('Mənbələr: Open Matchday — https://github.com/oladeeayo/open-matchday, football-data.co.uk və ESPN (qitə kubokları: AFC, CAF, Libertadores və s.). Eyni oyun bir neçə mənbədə varsa statistika üçün əvvəlcə football-data.co.uk, sonra Open Matchday, sonra ESPN götürülür. Statistikası olmayan oyunlar müvafiq statistik filtrdə uyğun sayılmır.')
     if FD_DIR.exists() and any(FD_DIR.glob('*.csv')):
         st.write(f'football-data.co.uk faylları: {len(list(FD_DIR.glob("*.csv")))}.')
     else:
         st.write('football-data.co.uk hələ yüklənməyib — sol paneldən "Məlumatı yenilə" düyməsinə bas.')
+    if (ESPN_DIR / 'results.csv').exists():
+        st.write('ESPN fayllarından oxunan nəticə sayı: ' + str(len(read_csv_safe(ESPN_DIR / 'results.csv'))) + '.')
+    else:
+        st.write('ESPN hələ yüklənməyib — sol paneldən "Məlumatı yenilə" düyməsinə bas.')
     if fd_only_teams:
         st.write(f'Yalnız football-data.co.uk-də tapılan komandalar: {len(fd_only_teams)}. Əgər bunların arasında Open Matchday-də başqa cür yazılan komanda varsa, app.py-dakı ALIASES siyahısına əlavə et.')
         st.code('\n'.join(fd_only_teams))
