@@ -1064,12 +1064,18 @@ st.session_state.setdefault('d_to', today)
 
 
 def _shift_dates(days):
-    # days=0 → bu günə (Bakı) qayıt; ±1 → seçilmiş tarix aralığını bir gün geri/irəli sürüşdür və analizi avtomatik işlət
+    # Ümumi naviqasiya: tarix aralığının hər iki tərəfini birlikdə sürüşdür.
     if days == 0:
         st.session_state['d_from'] = st.session_state['d_to'] = baku_today()
     else:
         st.session_state['d_from'] = st.session_state['d_from'] + timedelta(days=days)
         st.session_state['d_to'] = st.session_state['d_to'] + timedelta(days=days)
+    st.session_state['auto_run'] = True
+
+
+def _shift_one_date(key, days):
+    # Başlanğıc və son tarixi ayrıca əvvəlki/növbəti günə keçir.
+    st.session_state[key] = st.session_state[key] + timedelta(days=days)
     st.session_state['auto_run'] = True
 
 
@@ -1088,11 +1094,19 @@ with st.container(border=True):
                   use_container_width=True, help='Basanda Bakı vaxtı ilə bu günə qayıdır')
         n3.button('▶', key='next_day', on_click=_shift_dates, args=(1,), use_container_width=True, help='Növbəti gün')
     st.caption('🕒 Tarix və saatlar Bakı vaxtı ilədir (UTC+4).')
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
-        date_from = st.date_input('Başlanğıc tarixi', key='d_from')
+        st.caption('Başlanğıc tarixi')
+        left, date_col, right = st.columns([1, 5, 1], gap='small')
+        left.button('◀', key='from_prev', on_click=_shift_one_date, args=('d_from', -1), use_container_width=True, help='Başlanğıc tarixini bir gün geri çək')
+        date_from = date_col.date_input('Başlanğıc tarixi', key='d_from', label_visibility='collapsed')
+        right.button('▶', key='from_next', on_click=_shift_one_date, args=('d_from', 1), use_container_width=True, help='Başlanğıc tarixini bir gün irəli çək')
     with c2:
-        date_to = st.date_input('Son tarix', key='d_to')
+        st.caption('Son tarix')
+        left, date_col, right = st.columns([1, 5, 1], gap='small')
+        left.button('◀', key='to_prev', on_click=_shift_one_date, args=('d_to', -1), use_container_width=True, help='Son tarixini bir gün geri çək')
+        date_to = date_col.date_input('Son tarix', key='d_to', label_visibility='collapsed')
+        right.button('▶', key='to_next', on_click=_shift_one_date, args=('d_to', 1), use_container_width=True, help='Son tarixini bir gün irəli çək')
     with c3:
         n_games = st.number_input('Hər komandanın son neçə oyunu?', min_value=1, max_value=50, value=2, step=1)
     league_options = sorted({str(x) for x in pd.concat([fixtures['league'], results['league']]).dropna() if str(x).strip()})
