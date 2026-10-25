@@ -224,18 +224,18 @@ button[kind="primary"] { border-radius: 12px; font-weight: 700; padding: .65rem 
                          background: linear-gradient(135deg, #16a34a, #0f766e); border: none; }
 /* Analiz düyməsi səhifə ilə birlikdə sürüşməsin; ekranın üstündə sabit qalsın. */
 div.st-key-analyze_button {
-  position: fixed !important; right: 22px !important; bottom: 22px !important;
+  position: fixed !important; left: 50% !important; right: auto !important;
+  bottom: 22px !important; transform: translateX(-50%) !important;
   z-index: 99999 !important; width: auto !important; max-width: min(90vw, 310px) !important;
-  margin: 0 !important; padding: 0 !important; cursor: grab !important;
+  margin: 0 !important; padding: 0 !important;
   filter: drop-shadow(0 6px 18px rgba(0,0,0,.25));
 }
-div.st-key-analyze_button:active { cursor: grabbing !important; }
 div.st-key-analyze_button button {
   min-height: 52px !important; width: auto !important; min-width: 220px !important;
   white-space: nowrap !important; border-radius: 15px !important;
 }
 @media (max-width: 600px) {
-  div.st-key-analyze_button { right: 12px !important; bottom: 12px !important; max-width: calc(100vw - 24px) !important; }
+  div.st-key-analyze_button { left: 50% !important; right: auto !important; bottom: 12px !important; transform: translateX(-50%) !important; max-width: calc(100vw - 24px) !important; }
   div.st-key-analyze_button button { min-width: 0 !important; width: 100% !important; }
 }
 button[kind="primary"]:hover { filter: brightness(1.06); }
@@ -1392,63 +1392,7 @@ def team_last(team_k, date):
 
 run_clicked = st.button('🔎 Oyunları analiz et', type='primary', key='analyze_button')
 
-# Yeni Streamlit versiyalarında düyməni basıb saxlayaraq sürüşdürmək mümkündür.
-# JS dəstəklənməyən versiyada da düymə CSS vasitəsilə ekranda sabit qalır.
-_drag_script = r"""
-<script>
-(() => {
-  const setup = () => {
-    const el = document.querySelector('div.st-key-analyze_button');
-    if (!el || el.dataset.dragReady === '1') return !!el;
-    el.dataset.dragReady = '1';
-    let dragging = false, moved = false, sx = 0, sy = 0, left = 0, top = 0;
-    try {
-      const saved = JSON.parse(localStorage.getItem('zeosk_analyze_button_pos') || 'null');
-      if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
-        el.style.left = Math.max(4, Math.min(innerWidth - el.offsetWidth - 4, saved.left)) + 'px';
-        el.style.top = Math.max(4, Math.min(innerHeight - el.offsetHeight - 4, saved.top)) + 'px';
-        el.style.right = 'auto'; el.style.bottom = 'auto';
-      }
-    } catch(e) {}
-    el.addEventListener('pointerdown', e => {
-      if (e.button !== 0) return;
-      dragging = true; moved = false; sx = e.clientX; sy = e.clientY;
-      const r = el.getBoundingClientRect(); left = r.left; top = r.top;
-      el.setPointerCapture?.(e.pointerId);
-    });
-    el.addEventListener('pointermove', e => {
-      if (!dragging) return;
-      const dx = e.clientX - sx, dy = e.clientY - sy;
-      if (Math.abs(dx) + Math.abs(dy) > 5) moved = true;
-      if (!moved) return;
-      const x = Math.max(4, Math.min(innerWidth - el.offsetWidth - 4, left + dx));
-      const y = Math.max(4, Math.min(innerHeight - el.offsetHeight - 4, top + dy));
-      el.style.left = x + 'px'; el.style.top = y + 'px';
-      el.style.right = 'auto'; el.style.bottom = 'auto';
-    });
-    const finish = () => {
-      if (!dragging) return; dragging = false;
-      if (moved) {
-        const r = el.getBoundingClientRect();
-        try { localStorage.setItem('zeosk_analyze_button_pos', JSON.stringify({left:r.left, top:r.top})); } catch(e) {}
-      }
-    };
-    el.addEventListener('pointerup', finish); el.addEventListener('pointercancel', finish);
-    return true;
-  };
-  if (!setup()) {
-    const obs = new MutationObserver(() => { if (setup()) obs.disconnect(); });
-    obs.observe(document.documentElement, {childList:true, subtree:true});
-    setTimeout(() => obs.disconnect(), 10000);
-  }
-})();
-</script>
-"""
-try:
-    if hasattr(st, 'html'):
-        st.html(_drag_script, unsafe_allow_javascript=True)
-except (TypeError, Exception):
-    pass
+# Düymə sabit CSS mövqeyində qalır. Drag JS silinib ki, klik hadisəsini bloklamasın.
 auto_run = st.session_state.pop('auto_run', False)   # ◀ ▶ düymələri sonrası analiz avtomatik işləyir
 if run_clicked or (auto_run and criteria_selected):
     if date_from > date_to:
