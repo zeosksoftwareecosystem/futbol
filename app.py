@@ -222,6 +222,22 @@ header[data-testid="stHeader"] { background: transparent; }
 div[data-testid="stVerticalBlockBorderWrapper"] { border-radius: 16px; }
 button[kind="primary"] { border-radius: 12px; font-weight: 700; padding: .65rem 1rem;
                          background: linear-gradient(135deg, #16a34a, #0f766e); border: none; }
+/* Analiz düyməsi səhifə ilə birlikdə sürüşməsin; ekranın üstündə sabit qalsın. */
+div.st-key-analyze_button {
+  position: fixed !important; right: 22px !important; bottom: 22px !important;
+  z-index: 99999 !important; width: auto !important; max-width: min(90vw, 310px) !important;
+  margin: 0 !important; padding: 0 !important; cursor: grab !important;
+  filter: drop-shadow(0 6px 18px rgba(0,0,0,.25));
+}
+div.st-key-analyze_button:active { cursor: grabbing !important; }
+div.st-key-analyze_button button {
+  min-height: 52px !important; width: auto !important; min-width: 220px !important;
+  white-space: nowrap !important; border-radius: 15px !important;
+}
+@media (max-width: 600px) {
+  div.st-key-analyze_button { right: 12px !important; bottom: 12px !important; max-width: calc(100vw - 24px) !important; }
+  div.st-key-analyze_button button { min-width: 0 !important; width: 100% !important; }
+}
 button[kind="primary"]:hover { filter: brightness(1.06); }
 div[data-testid="stExpander"] { border-radius: 14px; border: 1px solid rgba(128,128,128,.28); margin-bottom: 8px; }
 section[data-testid="stSidebar"] .stButton button { border-radius: 10px; font-weight: 600; }
@@ -1167,34 +1183,56 @@ with st.container(border=True):
     st.markdown('<div class="sec">2 · Filtrlər</div>', unsafe_allow_html=True)
     cols = st.columns(3)
     with cols[0]:
-        _, goal_mode = _mode_row('goal', title='⚽ Qol filtrləri')
-        goal_lines = (2.5, 3.5, 4.5) if goal_mode == 'Oyunda' else (0.5, 1.5, 2.5)
-        goal_pref = 'Matç' if goal_mode == 'Oyunda' else 'Klub'
+        st.markdown("**⚽ Qol filtrləri**")
         btts = st.checkbox('BTTS — hər iki komanda qol vurub')
         btts_no = st.checkbox('BTTS yox — ən azı bir komanda qol vurmayıb')
-        goal_ov1 = st.checkbox(f'{goal_pref} {goal_lines[0]} üst', key=f'goal_ov1_{goal_mode}')
+        st.caption("Matç üzrə — hər iki komandanın qollarının cəmi")
+        match_goal_25 = st.checkbox('Matç 2.5 üst', key='match_goal_25')
         under25 = st.checkbox('Matç 2.5 alt')
-        goal_ov2 = st.checkbox(f'{goal_pref} {goal_lines[1]} üst', key=f'goal_ov2_{goal_mode}')
-        goal_ov3 = st.checkbox(f'{goal_pref} {goal_lines[2]} üst', key=f'goal_ov3_{goal_mode}')
+        match_goal_35 = st.checkbox('Matç 3.5 üst', key='match_goal_35')
+        match_goal_45 = st.checkbox('Matç 4.5 üst', key='match_goal_45')
+        st.caption("Klub üzrə — hər klubun öz qolları")
+        club_goal_05 = st.checkbox('Klub 0.5 üst', key='club_goal_05')
+        club_goal_15 = st.checkbox('Klub 1.5 üst', key='club_goal_15')
+        club_goal_25 = st.checkbox('Klub 2.5 üst', key='club_goal_25')
     with cols[1]:
-        _, ht_mode = _mode_row('ht', title='⏱️ 1-ci hissə')
-        ht_pref = '1-ci hissə' if ht_mode == 'Oyunda' else 'Klub 1-ci hissə'
-        ht05 = st.checkbox(f'{ht_pref} 0.5 üst', key=f'ht05_{ht_mode}')
+        st.markdown("**⏱️ 1-ci hissə**")
+        st.caption("Matç üzrə — ilk hissədəki ümumi qollar")
+        match_ht05 = st.checkbox('1-ci hissə 0.5 üst', key='match_ht05')
         ht05_under = st.checkbox('1-ci hissə 0.5 alt (qol yoxdur)')
-        ht15 = st.checkbox(f'{ht_pref} 1.5 üst', key=f'ht15_{ht_mode}')
+        match_ht15 = st.checkbox('1-ci hissə 1.5 üst', key='match_ht15')
         ht15_under = st.checkbox('1-ci hissə 1.5 alt')
         ht_draw = st.checkbox('1-ci hissə heç-heçə')
+        st.caption("Klub üzrə — hər klubun ilk hissə qolları")
+        club_ht05 = st.checkbox('Klub 1-ci hissə 0.5 üst', key='club_ht05')
+        club_ht15 = st.checkbox('Klub 1-ci hissə 1.5 üst', key='club_ht15')
     with cols[2]:
         st.markdown('**📊 Statistika**')
-        corners_on, corners_mode = _mode_row('corners', checkbox='Künc minimumu')
-        min_corners = _min_input(corners_on, corners_mode, 'corners', 'künc', (9, 30), (4, 20))
-        shots_on, shots_mode = _mode_row('shots', checkbox='Qapıya zərbə minimumu')
-        min_shots = _min_input(shots_on, shots_mode, 'shots', 'zərbə', (22, 60), (11, 40))
-        target_on, target_mode = _mode_row('target', checkbox='Qapıya dəqiq zərbə minimumu')
-        min_target = _min_input(target_on, target_mode, 'target', 'qapıya dəqiq zərbə', (8, 30), (4, 20))
+        st.caption('Künc zərbələri')
+        corners_match_on = st.checkbox('Oyunda künc minimumu', key='corners_match_on')
+        min_corners_match = st.number_input('Matç üzrə ümumi künc sayı', min_value=0, max_value=30, value=9, step=1, disabled=not corners_match_on, key='min_corners_match')
+        corners_club_on = st.checkbox('Klub üzrə künc minimumu', key='corners_club_on')
+        min_corners_club = st.number_input('Hər klub üçün künc sayı', min_value=0, max_value=20, value=4, step=1, disabled=not corners_club_on, key='min_corners_club')
+        st.caption('Qapıya zərbələr')
+        shots_match_on = st.checkbox('Oyunda zərbə minimumu', key='shots_match_on')
+        min_shots_match = st.number_input('Matç üzrə ümumi zərbə sayı', min_value=0, max_value=60, value=22, step=1, disabled=not shots_match_on, key='min_shots_match')
+        shots_club_on = st.checkbox('Klub üzrə zərbə minimumu', key='shots_club_on')
+        min_shots_club = st.number_input('Hər klub üçün zərbə sayı', min_value=0, max_value=40, value=11, step=1, disabled=not shots_club_on, key='min_shots_club')
+        st.caption('Qapıya dəqiq zərbələr')
+        target_match_on = st.checkbox('Oyunda dəqiq zərbə minimumu', key='target_match_on')
+        min_target_match = st.number_input('Matç üzrə ümumi dəqiq zərbə', min_value=0, max_value=30, value=8, step=1, disabled=not target_match_on, key='min_target_match')
+        target_club_on = st.checkbox('Klub üzrə dəqiq zərbə minimumu', key='target_club_on')
+        min_target_club = st.number_input('Hər klub üçün dəqiq zərbə', min_value=0, max_value=20, value=4, step=1, disabled=not target_club_on, key='min_target_club')
     st.markdown('<div class="rule">Hər komandanın seçilən son oyunlarının <b>HAMISI</b> bütün şərtlərə uyğun olmalıdır.</div>', unsafe_allow_html=True)
 
-criteria_selected = any([btts, btts_no, ht05, ht05_under, ht15, ht15_under, ht_draw, goal_ov1, under25, goal_ov2, goal_ov3, corners_on, shots_on, target_on])
+criteria_selected = any([
+    btts, btts_no, ht05_under, ht15_under, ht_draw, under25,
+    match_goal_25, match_goal_35, match_goal_45,
+    club_goal_05, club_goal_15, club_goal_25,
+    match_ht05, match_ht15, club_ht05, club_ht15,
+    corners_match_on, corners_club_on, shots_match_on, shots_club_on,
+    target_match_on, target_club_on
+])
 if not criteria_selected:
     st.info('Ən azı bir filtr seç. Tarixə uyğun oyunlar aşağıda görünür, analiz üçün isə filtr lazımdır.')
 
@@ -1240,31 +1278,47 @@ def active_conditions():
         conds.append(('BTTS', same(lambda d: (lambda hg, ag, has: ((hg > 0) & (ag > 0), has))(*ft(d)))))
     if btts_no:
         conds.append(('BTTS yox', same(lambda d: (lambda hg, ag, has: (~((hg > 0) & (ag > 0)), has))(*ft(d)))))
-    for on, line in ((goal_ov1, goal_lines[0]), (goal_ov2, goal_lines[1]), (goal_ov3, goal_lines[2])):
+    for on, label, mode, line in (
+        (match_goal_25, 'Matç 2.5 üst', 'Oyunda', 2.5),
+        (match_goal_35, 'Matç 3.5 üst', 'Oyunda', 3.5),
+        (match_goal_45, 'Matç 4.5 üst', 'Oyunda', 4.5),
+        (club_goal_05, 'Klub 0.5 üst', 'Klub', 0.5),
+        (club_goal_15, 'Klub 1.5 üst', 'Klub', 1.5),
+        (club_goal_25, 'Klub 2.5 üst', 'Klub', 2.5),
+    ):
         if on:
-            conds.append((f'{goal_pref} {line} üst ({_lbl(goal_mode)})',
-                          (lambda thr: lambda d: _atleast(d, 'ft_home', 'ft_away', goal_mode, thr))(int(line) + 1)))
+            conds.append((label, (lambda thr, mode_: lambda d: _atleast(d, 'ft_home', 'ft_away', mode_, thr))(int(line) + 1, mode)))
     if under25:
         conds.append(('Matç 2.5 alt', same(lambda d: (lambda hg, ag, has: (hg + ag <= 2, has))(*ft(d)))))
-    for on, line in ((ht05, 0.5), (ht15, 1.5)):
+    for on, label, mode, line in (
+        (match_ht05, '1-ci hissə 0.5 üst', 'Oyunda', 0.5),
+        (match_ht15, '1-ci hissə 1.5 üst', 'Oyunda', 1.5),
+        (club_ht05, 'Klub 1-ci hissə 0.5 üst', 'Klub', 0.5),
+        (club_ht15, 'Klub 1-ci hissə 1.5 üst', 'Klub', 1.5),
+    ):
         if on:
-            conds.append((f'{ht_pref} {line} üst ({_lbl(ht_mode)})',
-                          (lambda thr: lambda d: _atleast(d, 'ht_home', 'ht_away', ht_mode, thr))(int(line) + 1)))
+            conds.append((label, (lambda thr, mode_: lambda d: _atleast(d, 'ht_home', 'ht_away', mode_, thr))(int(line) + 1, mode)))
     if ht05_under:
         conds.append(('1-ci hissə 0.5 alt', same(lambda d: (lambda a, b, has: (a + b == 0, has))(*ht(d)))))
     if ht15_under:
         conds.append(('1-ci hissə 1.5 alt', same(lambda d: (lambda a, b, has: (a + b <= 1, has))(*ht(d)))))
     if ht_draw:
         conds.append(('1-ci hissə heç-heçə', same(lambda d: (lambda a, b, has: (a == b, has))(*ht(d)))))
-    if corners_on:
-        conds.append((f'Künc ≥ {int(min_corners)} ({_lbl(corners_mode)})',
-                      lambda d: _atleast(d, 'home_corners', 'away_corners', corners_mode, min_corners)))
-    if shots_on:
-        conds.append((f'Qapıya zərbə ≥ {int(min_shots)} ({_lbl(shots_mode)})',
-                      lambda d: _atleast(d, 'home_shots', 'away_shots', shots_mode, min_shots)))
-    if target_on:
-        conds.append((f'Qapıya dəqiq zərbə ≥ {int(min_target)} ({_lbl(target_mode)})',
-                      lambda d: _atleast(d, 'home_target', 'away_target', target_mode, min_target)))
+    for on, label, mode, threshold in (
+        (corners_match_on, f'Matç künc ≥ {int(min_corners_match)}', 'Oyunda', min_corners_match),
+        (corners_club_on, f'Klub künc ≥ {int(min_corners_club)}', 'Klub', min_corners_club),
+        (shots_match_on, f'Matç zərbə ≥ {int(min_shots_match)}', 'Oyunda', min_shots_match),
+        (shots_club_on, f'Klub zərbə ≥ {int(min_shots_club)}', 'Klub', min_shots_club),
+        (target_match_on, f'Matç dəqiq zərbə ≥ {int(min_target_match)}', 'Oyunda', min_target_match),
+        (target_club_on, f'Klub dəqiq zərbə ≥ {int(min_target_club)}', 'Klub', min_target_club),
+    ):
+        if on:
+            col_h, col_a = (
+                ('home_corners', 'away_corners') if 'künc' in label else
+                ('home_shots', 'away_shots') if 'zərbə' in label and 'dəqiq' not in label else
+                ('home_target', 'away_target')
+            )
+            conds.append((label, (lambda c1, c2, mode_, thr: lambda d: _atleast(d, c1, c2, mode_, thr))(col_h, col_a, mode, threshold)))
     return conds
 
 
@@ -1336,7 +1390,65 @@ def team_last(team_k, date):
         return None
     return hist
 
-run_clicked = st.button('🔎 Oyunları analiz et', type='primary', use_container_width=True)
+run_clicked = st.button('🔎 Oyunları analiz et', type='primary', key='analyze_button')
+
+# Yeni Streamlit versiyalarında düyməni basıb saxlayaraq sürüşdürmək mümkündür.
+# JS dəstəklənməyən versiyada da düymə CSS vasitəsilə ekranda sabit qalır.
+_drag_script = r"""
+<script>
+(() => {
+  const setup = () => {
+    const el = document.querySelector('div.st-key-analyze_button');
+    if (!el || el.dataset.dragReady === '1') return !!el;
+    el.dataset.dragReady = '1';
+    let dragging = false, moved = false, sx = 0, sy = 0, left = 0, top = 0;
+    try {
+      const saved = JSON.parse(localStorage.getItem('zeosk_analyze_button_pos') || 'null');
+      if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
+        el.style.left = Math.max(4, Math.min(innerWidth - el.offsetWidth - 4, saved.left)) + 'px';
+        el.style.top = Math.max(4, Math.min(innerHeight - el.offsetHeight - 4, saved.top)) + 'px';
+        el.style.right = 'auto'; el.style.bottom = 'auto';
+      }
+    } catch(e) {}
+    el.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return;
+      dragging = true; moved = false; sx = e.clientX; sy = e.clientY;
+      const r = el.getBoundingClientRect(); left = r.left; top = r.top;
+      el.setPointerCapture?.(e.pointerId);
+    });
+    el.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      const dx = e.clientX - sx, dy = e.clientY - sy;
+      if (Math.abs(dx) + Math.abs(dy) > 5) moved = true;
+      if (!moved) return;
+      const x = Math.max(4, Math.min(innerWidth - el.offsetWidth - 4, left + dx));
+      const y = Math.max(4, Math.min(innerHeight - el.offsetHeight - 4, top + dy));
+      el.style.left = x + 'px'; el.style.top = y + 'px';
+      el.style.right = 'auto'; el.style.bottom = 'auto';
+    });
+    const finish = () => {
+      if (!dragging) return; dragging = false;
+      if (moved) {
+        const r = el.getBoundingClientRect();
+        try { localStorage.setItem('zeosk_analyze_button_pos', JSON.stringify({left:r.left, top:r.top})); } catch(e) {}
+      }
+    };
+    el.addEventListener('pointerup', finish); el.addEventListener('pointercancel', finish);
+    return true;
+  };
+  if (!setup()) {
+    const obs = new MutationObserver(() => { if (setup()) obs.disconnect(); });
+    obs.observe(document.documentElement, {childList:true, subtree:true});
+    setTimeout(() => obs.disconnect(), 10000);
+  }
+})();
+</script>
+"""
+try:
+    if hasattr(st, 'html'):
+        st.html(_drag_script, unsafe_allow_javascript=True)
+except (TypeError, Exception):
+    pass
 auto_run = st.session_state.pop('auto_run', False)   # ◀ ▶ düymələri sonrası analiz avtomatik işləyir
 if run_clicked or (auto_run and criteria_selected):
     if date_from > date_to:
