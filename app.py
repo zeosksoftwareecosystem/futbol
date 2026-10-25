@@ -1203,7 +1203,6 @@ with st.sidebar:
         st.session_state['refresh_msgs'] = msgs
         st.rerun()
     st.caption('Yeniləmə internet tələb edir. Əvvəl yüklənmiş məlumatlar internet olmadan da analiz edilə bilər.')
-    app_section = st.radio('Bölmə', ['Əsas filtr', 'Günün oyunları — Faiz analizi'], key='app_section', help='Faiz analizi ayrıca bölmədir; əsas filtrin parametrləri dəyişmir.')
 
 fixtures, results, fd_only_teams = load_data()
 if fixtures.empty:
@@ -1218,70 +1217,6 @@ for c in ['ft_home', 'ft_away', 'ht_home', 'ht_away', 'home_corners', 'away_corn
     if c in results.columns:
         results[c] = pd.to_numeric(results[c], errors='coerce')
 results = results.dropna(subset=['date', 'home', 'away', 'ft_home', 'ft_away']).copy()
-
-# Ayrı bölmə: seçilən günün bütün məlum oyunları və komandaların əvvəlki N oyununa görə faiz.
-if st.session_state.get('app_section', 'Əsas filtr') == 'Günün oyunları — Faiz analizi':
-    st.markdown('<div class="hero"><h1>⚽ Günün oyunları — Faiz analizi</h1><p>Tarixi seç, əvvəlki oyun sayını və şərti təyin et. Oyunlar ən yüksək faizdən başlayaraq sıralanır.</p></div>', unsafe_allow_html=True)
-    c1, c2, c3 = st.columns([1.2, 1, 1.5])
-    with c1:
-        analysis_date = st.date_input('Oyun tarixi', value=baku_today(), key='percent_analysis_date')
-    with c2:
-        analysis_n = st.selectbox('Son neçə oyun?', [5, 10, 15, 20], index=1, key='percent_analysis_n')
-    with c3:
-        analysis_rule = st.selectbox('Statistik şərt', ['2.5 üst', '1.5 üst', '3.5 üst', '4.5 üst', 'Qol-qol + 2.5 üst'], key='percent_analysis_rule')
-    st.caption('Faiz hər komandanın həmin oyundan əvvəlki son oyunları əsasında hesablanır. Kubok və liqa oyunları birlikdə nəzərə alınır.')
-
-    # Həm qarşıdakı oyunları, həm də seçilmiş gündə artıq keçirilmiş oyunları göstər.
-    day_f = fixtures[fixtures['date'].dt.date == analysis_date].copy() if not fixtures.empty else pd.DataFrame()
-    day_r = results[results['date'].dt.date == analysis_date].copy() if not results.empty else pd.DataFrame()
-    if not day_f.empty:
-        day_f['played'] = False
-    if not day_r.empty:
-        day_r['played'] = True
-    day_games = pd.concat([day_f, day_r], ignore_index=True, sort=False) if (not day_f.empty or not day_r.empty) else pd.DataFrame()
-    if not day_games.empty:
-        day_games['_home_norm'] = day_games['home'].map(norm_search)
-        day_games['_away_norm'] = day_games['away'].map(norm_search)
-        day_games = day_games.drop_duplicates(subset=['date', '_home_norm', '_away_norm'], keep='last')
-
-    def _rule_hit(hist):
-        hg = pd.to_numeric(hist['ft_home'], errors='coerce')
-        ag = pd.to_numeric(hist['ft_away'], errors='coerce')
-        total = hg + ag
-        if analysis_rule == '1.5 üst': return total >= 2
-        if analysis_rule == '2.5 üst': return total >= 3
-        if analysis_rule == '3.5 üst': return total >= 4
-        if analysis_rule == '4.5 üst': return total >= 5
-        return (hg >= 1) & (ag >= 1) & (total >= 3)
-
-    def _team_percent(team, match_date):
-        k = norm_search(team)
-        hist = results[(results['date'] < match_date) & ((results['home'].map(norm_search) == k) | (results['away'].map(norm_search) == k))].sort_values('date', ascending=False).head(int(analysis_n))
-        if hist.empty:
-            return None, 0, 0
-        hit = int(_rule_hit(hist).fillna(False).sum())
-        return round(hit * 100 / len(hist), 1), hit, len(hist)
-
-    if day_games.empty:
-        st.info('Bu tarix üçün yüklənmiş oyun tapılmadı. Sol paneldən “Məlumatı yenilə” düyməsini yoxla.')
-    else:
-        rows = []
-        for _, game in day_games.iterrows():
-            dt = pd.to_datetime(game.get('date'), errors='coerce')
-            hp, hh, hn = _team_percent(game.get('home', ''), dt)
-            ap, ah, an = _team_percent(game.get('away', ''), dt)
-            available = [x for x in (hp, ap) if x is not None]
-            avg = round(sum(available) / len(available), 1) if available else -1
-            score = ''
-            if pd.notna(game.get('ft_home')) and pd.notna(game.get('ft_away')):
-                score = f"{int(game['ft_home'])}–{int(game['ft_away'])}"
-            tm = str(game.get('time', '') or '')
-            rows.append({'sort': avg, 'Saat': tm, 'Liqa': str(game.get('league', '') or '—'), 'Ev sahibi': str(game.get('home', '')), 'Hesab': score or '—', 'Səfər': str(game.get('away', '')), 'Ev sahibi %': f'{hp:.1f}% ({hh}/{hn})' if hp is not None else 'Məlumat yoxdur', 'Səfər %': f'{ap:.1f}% ({ah}/{an})' if ap is not None else 'Məlumat yoxdur', 'Orta faiz': f'{avg:.1f}%' if avg >= 0 else '—'})
-        out = pd.DataFrame(rows).sort_values('sort', ascending=False, na_position='last')
-        st.metric('Tapılan oyunlar', len(out))
-        st.dataframe(out.drop(columns=['sort']), hide_index=True, use_container_width=True)
-        st.caption('Nümunə ölçüsü hər komanda üçün mövcud olan son oyunların sayıdır. Faiz keçmiş nəticələrin statistikasıdır, gələcək oyunun zəmanəti deyil.')
-    st.stop()
 
 today = baku_today()   # Bakı vaxtı ilə bu gün (server UTC olsa belə)
 st.session_state.setdefault('d_from', today)
