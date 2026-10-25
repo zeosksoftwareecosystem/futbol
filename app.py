@@ -1325,7 +1325,8 @@ with st.sidebar:
         st.session_state['refresh_msgs'] = msgs
         st.rerun()
     use_ss = st.checkbox('SofaScore sınaq mənbəyini istifadə et (analizi yavaşladır)', value=False, key='use_ss')
-    st.caption('Yeniləmə internet tələb edir. Əvvəl yüklənmiş məlumatlar internet olmadan da analiz edilə bilər.')
+    live_scores_on = st.checkbox('Canlı hesabları yoxla (analizi ləngidə bilər)', value=False, key='live_scores_on')
+    st.caption('Yeniləmə və canlı hesablar internet tələb edir. Sürətli analiz üçün canlı hesab yoxlaması standart olaraq söndürülüb.')
 
 fixtures, results, fd_only_teams = load_data(use_ss)
 if fixtures.empty:
@@ -1770,7 +1771,7 @@ if run_clicked or (auto_run and criteria_selected):
     _t1 = _t.perf_counter()
     hk_arr, ph_arr, pa_arr = results['home_k'].values, results['_pass_h'].values, results['_pass_a'].values
     total_games = len(day_games)
-    step = max(1, total_games // 50)
+    step = max(1, total_games // 12)  # progress UI yeniləmələrini azaldıb interfeysi sürətləndir
     for i, game in enumerate(day_games.itertuples(index=False)):
         league, date, home, away = game.league, game.date, game.home, game.away
         hp = team_last_pos(team_idx, game.home_k, date, n_int)
@@ -1804,7 +1805,7 @@ if run_clicked or (auto_run and criteria_selected):
         for hk_, ak_, d_, fh_, fa_ in rr.itertuples(index=False):
             res_idx.setdefault((hk_, ak_), []).append((d_, int(fh_), int(fa_)))
         live_rows = []
-        if any(pd.to_datetime(it['Tarix']).date() >= today - timedelta(days=1) for it in passed):
+        if live_scores_on and any(pd.to_datetime(it['Tarix']).date() >= today - timedelta(days=1) for it in passed):
             with st.spinner('Canlı hesablar yoxlanılır...'):
                 try:
                     live_rows = fetch_live_scores()
