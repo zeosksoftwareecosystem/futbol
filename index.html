@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="az">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#071b16">
+  <title>Futbol Filtri | Faiz Analizi</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar"><div class="brand"><div class="logo">⚽</div><div><strong>FUTBOL <span>FİLTRİ</span></strong><small>Günün oyunları · Faiz analizi</small></div></div><div class="live-pill"><i></i> STATİSTİK PANELİ</div></header>
+  <main>
+    <section class="hero"><div class="hero-copy"><p class="eyebrow">MATÇ ANALİZİ / V6 WEB</p><h1>Rəqəmlərlə <em>seç.</em><br>Oyunları müqayisə et.</h1><p class="hero-sub">Tarix seç, komanda formalarını yoxla və seçdiyin statistikaya görə oyunları faizlə sıralat.</p></div><div class="hero-ball">⚽</div></section>
+    <section class="filters panel"><div class="section-heading"><div><span class="step">01</span><h2>Analiz parametrləri</h2></div><button id="reload" class="button ghost">↻ Məlumatı yenilə</button></div>
+      <div class="filter-grid">
+        <label>Oyun tarixi<input type="date" id="matchDate"></label>
+        <label>Komandanın son oyunları<select id="lastN"><option>5</option><option selected>10</option><option>15</option><option>20</option></select></label>
+        <label>Statistik şərt<select id="criterion"><option value="over25">Ümumi qol: 2.5 üst</option><option value="over15">Ümumi qol: 1.5 üst</option><option value="over35">Ümumi qol: 3.5 üst</option><option value="over45">Ümumi qol: 4.5 üst</option><option value="btts">Qarşılıqlı qol (BTTS)</option><option value="btts25">BTTS + 2.5 üst</option></select></label>
+        <label>Yarış<select id="league"><option value="all">Mövcud yarışlar — hamısı</option></select></label>
+      </div>
+      <div class="actions"><button id="analyze" class="button primary">⚡ Oyunları analiz et</button><span class="hint">Məlumat mənbəyi: ESPN-in açıq scoreboard API-si. Əhatə olunan yarışlar mənbədən asılıdır.</span></div>
+    </section>
+    <section class="stats-grid"><div class="stat panel"><span>Tapılan oyunlar</span><strong id="totalGames">—</strong><small>Seçilmiş tarix</small></div><div class="stat panel"><span>Yoxlanılan komandalar</span><strong id="teamsChecked">—</strong><small>Tarixçə axtarışı</small></div><div class="stat panel"><span>Ən yüksək orta faiz</span><strong id="topPercent">—</strong><small>İki komandanın ortalaması</small></div></section>
+    <section class="results panel"><div class="section-heading"><div><span class="step">02</span><h2>Analiz nəticələri</h2></div><span id="status" class="status">Tarix seçib analizi başladın</span></div><div id="notice" class="notice">Oyunlar canlı mənbədən yüklənir. Tarixçə və nəticələrin tamlığı yarışa görə dəyişə bilər.</div><div id="results" class="match-list"><div class="empty"><div>◉</div><strong>Hələ nəticə yoxdur</strong><p>Parametrləri seçin və “Oyunları analiz et” düyməsinə basın.</p></div></div></section>
+    <footer>Futbol Filtri · GitHub Pages versiyası <span>Faizlər keçmiş nəticələrə əsaslanır, gələcək oyunun zəmanəti deyil.</span></footer>
+  </main>
+  <script src="app.js"></script>
+</body></html>

@@ -1,31 +1,15 @@
-# Futbol Filtri — mobil veb tətbiq
+# Futbol Filtri — GitHub Pages versiyası
 
-Bu tətbiq telefonda Chrome/Safari ilə açılan Streamlit proqramıdır. Məlumatları Open Matchday GitHub repozitoriyasının arxivindən götürür və təxminən 6 saat keşdə saxlayır. “Məlumatları yenilə” düyməsi keşdən kənar təzə arxiv endirir.
+Bu qovluq Streamlit-dən asılı olmayan statik HTML/CSS/JavaScript versiyasıdır.
 
-## Pulsuz yerləşdirmə (Streamlit Community Cloud)
+## GitHub Pages-də yayımlamaq
+1. `https://github.com/zeosksoftwareecosystem/futbol` repozitoriyasını aç.
+2. **Add file → Upload files** seç.
+3. Bu qovluğun içindəki `index.html`, `style.css`, `app.js`, `README_AZ.md` fayllarını repozitoriyanın kök qovluğuna yüklə. `app.py` və `requirements.txt` fayllarını silmək lazım deyil.
+4. **Commit changes** et.
+5. **Settings → Pages** bölməsinə keç.
+6. **Build and deployment → Deploy from a branch** seç; branch `main`, folder `/(root)` seç və Save et.
+7. Yayımlandıqdan sonra sayt ünvanı adətən `https://zeosksoftwareecosystem.github.io/futbol/` olacaq.
 
-1. GitHub-da yeni repo yarat (məsələn, `futbol-filtri`).
-2. Bu qovluqdakı `app.py` və `requirements.txt` fayllarını həmin repoya yüklə.
-3. https://share.streamlit.io/ saytına daxil ol, GitHub ilə giriş et və **Create app** seç.
-4. Repository, branch (`main`) və əsas fayl (`app.py`) seçib deploy et.
-5. Tətbiq hazır olanda linki telefonda aç.
-
-## Yalnız özün üçün şifrə
-
-Streamlit Community Cloud-da tətbiqin **Settings → Secrets** bölməsinə bunu əlavə et:
-
-```toml
-APP_PASSWORD = "BURAYA_GUCLU_SIFRE_YAZ"
-```
-
-Save edib tətbiqi yenidən başladandan sonra şifrə soruşacaq. Secrets təyin edilməsə, tətbiq xəbərdarlıq göstərir və linki bilənlər aça bilər. Şifrəni GitHub koduna yazma.
-
-## Filtrlər
-
-- Hər komandanın son 2, 3, 4, 5, 6, 8 və ya 10 tamamlanmış oyunu
-- BTTS, tam oyun 2.5/3.5/4.5 üst
-- Birinci hissə 0.5/1.5 üst
-- Künc və sarı vərəqə minimumları
-- Tarix aralığı, nəticə cədvəli və CSV yükləmə
-
-Mənbədə ofsayd sütunu yoxdur. Künc/kart və fasilə məlumatları bəzi matçlarda boş ola bilər. Tarixçə eyni yarışın nəticə faylı üzrə yoxlanılır. Pulsuz hostinqin işləmə, yaddaş və əlçatanlıq limitləri ola bilər.
+## Vacib məhdudiyyət
+GitHub Pages Python kodunu işə salmır. Bu versiya brauzerdə işləyir və oyunları ESPN-in açıq scoreboard API-sindən almağa çalışır. ESPN-də olan yarışlarla məhdudlaşır; əvvəlki Python tətbiqindəki bütün mənbələr, bütün çempionatlar və künc/kart statistikaları bu statik versiyaya avtomatik köçürülməyib. API-nin cavabı və CORS siyasəti dəyişərsə, məlumat yüklənməyə bilər. Faizlər yalnız API-dən əldə olunan tarixçə əsasında hesablanır.
