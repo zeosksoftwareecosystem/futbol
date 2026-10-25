@@ -30,9 +30,11 @@ FD_RENAME = {
     'HomeTeam': 'home', 'AwayTeam': 'away', 'Time': 'time',
     'FTHG': 'ft_home', 'FTAG': 'ft_away', 'HTHG': 'ht_home', 'HTAG': 'ht_away',
     'HC': 'home_corners', 'AC': 'away_corners', 'HY': 'home_yellow', 'AY': 'away_yellow',
+    'HS': 'home_shots', 'AS': 'away_shots', 'HST': 'home_target', 'AST': 'away_target',
 }
 FD_KEEP = ['date', 'time', 'home', 'away', 'league', 'ft_home', 'ft_away', 'ht_home', 'ht_away',
-           'home_corners', 'away_corners', 'home_yellow', 'away_yellow']
+           'home_corners', 'away_corners', 'home_yellow', 'away_yellow',
+           'home_shots', 'away_shots', 'home_target', 'away_target']
 
 # ---- ESPN (üçüncü mənbə: qitə kubokları və Open Matchday-də olmayan yarışlar) ----
 # API açarı lazım deyil. Rəsmi olmayan ictimai endpointdir, gələcəkdə dəyişə bilər.
@@ -907,7 +909,12 @@ def _espn_stats(slug, event_id):
                 out.setdefault(f'{side}_corners', int(val))
             elif name == 'yellowcards' or 'yellow' in label:
                 out.setdefault(f'{side}_yellow', int(val))
-    for a_, b_ in (('home_corners', 'away_corners'), ('home_yellow', 'away_yellow')):
+            elif name == 'shotsontarget' or label in ('shots on target', 'shots on goal'):
+                out.setdefault(f'{side}_target', int(val))
+            elif name == 'totalshots' or label in ('shots', 'total shots'):
+                out.setdefault(f'{side}_shots', int(val))
+    for a_, b_ in (('home_corners', 'away_corners'), ('home_yellow', 'away_yellow'),
+                   ('home_shots', 'away_shots'), ('home_target', 'away_target')):
         if not (a_ in out and b_ in out):
             out.pop(a_, None)
             out.pop(b_, None)
@@ -941,11 +948,13 @@ def refresh_espn():
             res_all = res_all.drop_duplicates(subset=key).set_index(key).combine_first(old.set_index(key)).reset_index()
     stats_done = stats_left = 0
     if not res_all.empty:
-        for col in ('home_corners', 'away_corners', 'home_yellow', 'away_yellow', 'stats_try', 'id', 'slug'):
+        for col in ('home_corners', 'away_corners', 'home_yellow', 'away_yellow', 'home_shots', 'away_shots',
+                    'home_target', 'away_target', 'stats_try', 'id', 'slug'):
             if col not in res_all.columns:
                 res_all[col] = float('nan')
         res_all['stats_try'] = pd.to_numeric(res_all['stats_try'], errors='coerce').fillna(0)
-        need = (res_all['id'].notna() & res_all['slug'].notna() & res_all['home_corners'].isna()
+        need = (res_all['id'].notna() & res_all['slug'].notna()
+                & (res_all['home_corners'].isna() | res_all['home_shots'].isna())
                 & (res_all['stats_try'] < ESPN_STATS_MAX_TRIES))
         pend = res_all[need].sort_values('date', ascending=False).head(ESPN_STATS_PER_REFRESH)
         stats_left = int(need.sum()) - len(pend)
@@ -1025,7 +1034,8 @@ if fixtures.empty:
 fixtures['date'] = pd.to_datetime(fixtures.get('date'), errors='coerce')
 if not results.empty:
     results['date'] = pd.to_datetime(results.get('date'), errors='coerce')
-for c in ['ft_home', 'ft_away', 'ht_home', 'ht_away', 'home_corners', 'away_corners', 'home_yellow', 'away_yellow']:
+for c in ['ft_home', 'ft_away', 'ht_home', 'ht_away', 'home_corners', 'away_corners', 'home_yellow', 'away_yellow',
+          'home_shots', 'away_shots', 'home_target', 'away_target']:
     if c in results.columns:
         results[c] = pd.to_numeric(results[c], errors='coerce')
 results = results.dropna(subset=['date', 'home', 'away', 'ft_home', 'ft_away']).copy()
@@ -1147,9 +1157,13 @@ with st.container(border=True):
         min_corners = st.number_input('Matç üzrə minimum ümumi künc', min_value=0, max_value=30, value=9, disabled=not corners_on)
         cards_on = st.checkbox('Sarı vərəqə minimumu')
         min_cards = st.number_input('Matç üzrə minimum sarı vərəqə', min_value=0, max_value=20, value=3, disabled=not cards_on)
+        shots_on = st.checkbox('Qapıya zərbə minimumu (ümumi zərbə)')
+        min_shots = st.number_input('Matç üzrə minimum ümumi zərbə (hər iki komanda)', min_value=0, max_value=60, value=22, disabled=not shots_on)
+        target_on = st.checkbox('Qapıya dəqiq zərbə minimumu')
+        min_target = st.number_input('Matç üzrə minimum qapıya dəqiq zərbə (hər iki komanda)', min_value=0, max_value=30, value=8, disabled=not target_on)
     st.markdown('<div class="rule">Hər komandanın seçilən son oyunlarının <b>HAMISI</b> bütün şərtlərə uyğun olmalıdır.</div>', unsafe_allow_html=True)
 
-criteria_selected = any([btts, btts_no, ht05, ht05_under, ht15, ht15_under, ht_draw, over25, under25, over35, over45, corners_on, cards_on])
+criteria_selected = any([btts, btts_no, ht05, ht05_under, ht15, ht15_under, ht_draw, over25, under25, over35, over45, corners_on, cards_on, shots_on, target_on])
 if not criteria_selected:
     st.info('Ən azı bir filtr seç. Tarixə uyğun oyunlar aşağıda görünür, analiz üçün isə filtr lazımdır.')
 
@@ -1207,6 +1221,16 @@ def active_conditions():
             a, b = _num(d, 'home_yellow'), _num(d, 'away_yellow')
             return a + b >= min_cards, a.notna() & b.notna()
         conds.append((f'Sarı vərəqə ≥ {int(min_cards)}', _y))
+    if shots_on:
+        def _s(d):
+            a, b = _num(d, 'home_shots'), _num(d, 'away_shots')
+            return a + b >= min_shots, a.notna() & b.notna()
+        conds.append((f'Qapıya zərbə ≥ {int(min_shots)}', _s))
+    if target_on:
+        def _t(d):
+            a, b = _num(d, 'home_target'), _num(d, 'away_target')
+            return a + b >= min_target, a.notna() & b.notna()
+        conds.append((f'Qapıya dəqiq zərbə ≥ {int(min_target)}', _t))
     return conds
 
 
@@ -1232,6 +1256,7 @@ def conditions_contradict():
     rows = [(hg, ag, a, b) for hg in range(8) for ag in range(8) for a in range(hg + 1) for b in range(ag + 1)]
     g = pd.DataFrame(rows, columns=['ft_home', 'ft_away', 'ht_home', 'ht_away'])
     g['home_corners'] = g['away_corners'] = g['home_yellow'] = g['away_yellow'] = 99
+    g['home_shots'] = g['away_shots'] = g['home_target'] = g['away_target'] = 99
     return not bool(match_pass_vec(g).any())
 
 
@@ -1380,6 +1405,12 @@ if run_clicked or (auto_run and criteria_selected):
                             hyc, ayc = old_match.get('home_yellow'), old_match.get('away_yellow')
                             if pd.notna(hyc) and pd.notna(ayc):
                                 chips += f'<span class="chip y">Sarı {int(hyc + ayc)}</span>'
+                            hsh, ash = old_match.get('home_shots'), old_match.get('away_shots')
+                            hst_, ast_ = old_match.get('home_target'), old_match.get('away_target')
+                            if pd.notna(hsh) and pd.notna(ash):
+                                chips += f'<span class="chip c">Zərbə {int(hsh + ash)}</span>'
+                            if pd.notna(hst_) and pd.notna(ast_):
+                                chips += f'<span class="chip c">Qapıya {int(hst_ + ast_)}</span>'
                             src_text = src_label(old_match.get('src', ''))
                             if src_text:
                                 chips += f'<span class="chip s">{src_text}</span>'
@@ -1397,32 +1428,61 @@ if run_clicked or (auto_run and criteria_selected):
     else:
         st.info('Seçilən şərtlərə uyğun oyun tapılmadı. Tarix aralığını genişləndir və ya filtrləri dəyiş.')
 
+BT_PERIODS = [30, 60, 90, 180, 365, 730]
+
+
+def _bt_summary(R, days, leagues_all, today_ts):
+    """Seçilmiş dövr üçün: yoxlanılan oyunlar (E), filtrə uyğun olanlar (Q)."""
+    period = (R['date'] >= today_ts - pd.Timedelta(days=int(days))) & (R['date'] < today_ts) & R['has']
+    if not leagues_all:
+        period &= R['league'].isin(sel_leagues)
+    E = R[period]
+    return E, E[E['qual']]
+
+
 with st.expander('📈 Geriyə test — seçilmiş filtr keçmişdə neçə faiz tutub?', expanded=False):
     st.caption('Keçmiş oyunlara baxılır: oyundan əvvəl hər iki komandanın son N oyunu seçilmiş filtrlərin hamısına uyğun olubsa, həmin oyunun özü də eyni filtrlərə uyğun gəldimi? '
-               'Bu, yuxarıdakı analizin keçmişdəki "faizidir". Keçmiş faiz gələcək nəticəyə zəmanət vermir.')
-    bt_days = st.select_slider('Keçmiş dövr', options=[30, 60, 90, 180, 365], value=180, format_func=lambda d: f'son {d} gün', key='bt_days')
-    if st.button('📈 Geriyə testi işlət', use_container_width=True, key='bt_run'):
-        if not criteria_selected:
-            st.warning('Əvvəl ən azı bir filtr seç.')
-        elif conditions_contradict():
-            st.warning('Seçilmiş filtrlər bir-birinə ziddir.')
-        elif not sel_leagues:
-            st.warning('Heç bir liqa seçilməyib.')
-        else:
-            R = results.copy().reset_index(drop=True)
-            R['flag'] = match_pass_vec(R)
-            R['has'] = has_data_vec(R)
-            R['qual'] = backtest_qualified(R, int(n_games))
+               'Nəticə filtri dəyişdikcə avtomatik yenilənir. Keçmiş faiz gələcək nəticəyə zəmanət vermir.')
+    bt_days = st.select_slider('Ətraflı baxılan dövr', options=BT_PERIODS, value=180, format_func=lambda d: f'son {d} gün', key='bt_days')
+    if not criteria_selected:
+        st.info('Yuxarıdan ən azı bir filtr seç, faiz burada avtomatik görünəcək.')
+    elif conditions_contradict():
+        st.warning('Seçilmiş filtrlər bir-birinə ziddir (məsələn "2.5 üst" və "2.5 alt").')
+    elif not sel_leagues:
+        st.warning('Heç bir liqa seçilməyib.')
+    else:
+        try:
+            bt_key = (tuple(n for n, _ in active_conditions()), int(min_corners) if corners_on else 0, int(min_cards) if cards_on else 0,
+                      int(min_shots) if shots_on else 0, int(min_target) if target_on else 0,
+                      int(n_games), len(results), str(results['date'].max()), str(baku_today()))
+            if st.session_state.get('bt_cache_key') != bt_key:
+                with st.spinner('Geriyə test hesablanır...'):
+                    R = results.copy().reset_index(drop=True)
+                    R['flag'] = match_pass_vec(R)
+                    R['has'] = has_data_vec(R)
+                    R['qual'] = backtest_qualified(R, int(n_games))
+                    st.session_state['bt_cache'], st.session_state['bt_cache_key'] = R, bt_key
+            R = st.session_state['bt_cache']
             bt_today = pd.Timestamp(baku_today())
-            period = (R['date'] >= bt_today - pd.Timedelta(days=int(bt_days))) & (R['date'] < bt_today) & R['has']
-            if len(sel_leagues) < len(league_options):
-                period &= R['league'].isin(sel_leagues)
-            E = R[period]
-            Q = E[E['qual']]
+            all_leagues = len(sel_leagues) >= len(league_options)
+
+            # Bütün dövrlər üzrə qısa cədvəl — seçilmiş dövrdə uyğun oyun olmasa belə faiz görünsün
+            prow = []
+            for d in BT_PERIODS:
+                E_, Q_ = _bt_summary(R, d, all_leagues, bt_today)
+                prow.append({'Dövr': f'son {d} gün', 'Yoxlanılan oyun': len(E_), 'Filtrə uyğun': len(Q_),
+                             'Tutdu': int(Q_['flag'].sum()),
+                             'Faiz': f"{Q_['flag'].mean() * 100:.1f}%" if len(Q_) else '—',
+                             'Baza faizi': f"{E_['flag'].mean() * 100:.1f}%" if len(E_) else '—'})
+            st.markdown('**Dövrlər üzrə nəticə**')
+            st.dataframe(pd.DataFrame(prow), hide_index=True, use_container_width=True)
+
+            E, Q = _bt_summary(R, bt_days, all_leagues, bt_today)
             if E.empty:
-                st.info('Bu dövrdə seçilmiş liqalarda yoxlanıla bilən oyun yoxdur.')
+                st.info(f'Son {int(bt_days)} gündə seçilmiş liqalarda yoxlanıla bilən oyun yoxdur (lazımi statistika çatmır və ya oyun yoxdur).')
             elif Q.empty:
-                st.info(f'Son {int(bt_days)} gündə hər iki komandanın son {int(n_games)} oyunu bütün şərtlərə uyğun gələn oyun tapılmadı. Oyun sayını azalt və ya filtrləri yüngülləşdir.')
+                st.info(f'Son {int(bt_days)} gündə hər iki komandanın son {int(n_games)} oyunu bütün şərtlərə uyğun gələn oyun yoxdur. '
+                        f'Yoxlanılan oyun: {len(E)}, baza faizi: {E["flag"].mean() * 100:.1f}%. Daha uzun dövr seç, "son neçə oyun" sayını azalt və ya filtrləri yüngülləşdir.')
             else:
                 hits = int(Q['flag'].sum())
                 base = float(E['flag'].mean())
@@ -1430,7 +1490,7 @@ with st.expander('📈 Geriyə test — seçilmiş filtr keçmişdə neçə faiz
                 m1.metric('Filtrə uyğun oyun', len(Q))
                 m2.metric('Özü də uyğun gəldi', hits)
                 m3.metric('Keçmiş faiz', f'{hits / len(Q) * 100:.1f}%')
-                m4.metric('Baza faizi', f'{base * 100:.1f}%', help='Eyni şərtlərin tarixçəsinə baxmadan bütün oyunlarda ödənmə faizi')
+                m4.metric('Baza faizi', f'{base * 100:.1f}%', help='Tarixçəyə baxmadan bütün oyunlarda eyni şərtlərin ödənmə faizi')
                 lift = hits / len(Q) - base
                 st.caption(f'Yoxlanılan oyun: {len(E)} · filtr baza faizinə nisbətən {lift * 100:+.1f} faiz bəndi fərq yaradıb.'
                            + (' ⚠️ Nümunə kiçikdir (30-dan az oyun), nəticəyə etibar etmə.' if len(Q) < 30 else ''))
@@ -1444,10 +1504,12 @@ with st.expander('📈 Geriyə test — seçilmiş filtr keçmişdə neçə faiz
                 by = by.rename(columns={'league': 'Liqa'}).sort_values(['Oyun', 'Faiz'], ascending=False).head(20)
                 st.markdown('**Liqa üzrə (ən çox oyun olan 20)**')
                 st.dataframe(by, hide_index=True, use_container_width=True)
+        except Exception as e:
+            st.error(f'Geriyə test hesablanmadı: {e}')
 
 with st.expander('Məlumat bazası haqqında'):
     st.write(f'Çempionat qovluqları: {len(list(DATA_DIR.iterdir())) if DATA_DIR.exists() else 0}. Qarşıdakı oyun sətri: {len(fixtures)}. Tarixi nəticə sətri: {len(results)}. Siyahıdakı liqa sayı: {len(league_options)}.')
-    st.write('Mənbələr: Open Matchday — https://github.com/oladeeayo/open-matchday, football-data.co.uk (əsas və əlavə liqalar), openfootball (https://github.com/openfootball/football.json), international_results (https://github.com/martj42/international_results, milli komandalar) və ESPN (qitə kubokları, daxili kuboklar və onlarla liqa; yarımvaxt, künc və sarı kart ESPN-dən də çıxarılır). Eyni oyun bir neçə mənbədə varsa statistika üçün əvvəlcə football-data.co.uk, sonra Open Matchday, sonra openfootball, sonra ESPN götürülür. Statistikası olmayan oyunlar müvafiq statistik filtrdə uyğun sayılmır.')
+    st.write('Mənbələr: Open Matchday — https://github.com/oladeeayo/open-matchday, football-data.co.uk (əsas və əlavə liqalar), openfootball (https://github.com/openfootball/football.json), international_results (https://github.com/martj42/international_results, milli komandalar) və ESPN (qitə kubokları, daxili kuboklar və onlarla liqa; yarımvaxt, künc və sarı kart ESPN-dən də çıxarılır). Eyni oyun bir neçə mənbədə varsa statistika üçün əvvəlcə football-data.co.uk, sonra Open Matchday, sonra openfootball, sonra ESPN götürülür. Künc, sarı vərəqə, zərbə və qapıya dəqiq zərbə statistikası football-data.co.uk əsas liqalarında, Open Matchday-də və ESPN-in yüklədiyi oyunlarda var. Statistikası olmayan oyunlar müvafiq statistik filtrdə uyğun sayılmır.')
     st.write(f'Əlavə liqa faylları (football-data.co.uk/new): {len(list(FDX_DIR.glob("*.csv"))) if FDX_DIR.exists() else 0}. openfootball faylları: {len(list(OF_DIR.glob("*.json"))) if OF_DIR.exists() else 0}.')
     if FD_DIR.exists() and any(FD_DIR.glob('*.csv')):
         st.write(f'football-data.co.uk faylları: {len(list(FD_DIR.glob("*.csv")))}.')
