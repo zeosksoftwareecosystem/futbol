@@ -1,5 +1,5 @@
 from pathlib import Path
-import zipfile, io, re, unicodedata, requests, shutil, tempfile, json
+import zipfile, io, re, difflib, unicodedata, requests, shutil, tempfile, json
 from datetime import datetime, timezone
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -155,8 +155,12 @@ ALIASES = {
 _DROP_TOKENS = {'fc', 'afc', 'cf', 'sc', 'fk', 'sk', 'cd', 'ud', 'rcd', 'the', 'club'}
 
 
+_TRANSLIT = str.maketrans({'ø': 'o', 'Ø': 'O', 'æ': 'ae', 'Æ': 'AE', 'œ': 'oe', 'Œ': 'OE', 'ß': 'ss', 'đ': 'd', 'Đ': 'D',
+                           'ð': 'd', 'Ð': 'D', 'þ': 'th', 'Þ': 'TH', 'ł': 'l', 'Ł': 'L', 'ı': 'i', 'İ': 'I'})
+
+
 def team_key(name):
-    s = unicodedata.normalize('NFKD', str(name)).encode('ascii', 'ignore').decode().lower()
+    s = unicodedata.normalize('NFKD', str(name).translate(_TRANSLIT)).encode('ascii', 'ignore').decode().lower()
     s = s.replace('&', ' and ')
     s = re.sub(r"['’.]", '', s)
     s = re.sub(r'[^a-z0-9 ]', ' ', s)
@@ -513,7 +517,7 @@ def add_keys(df, src):
 def _tokens_match(short, long_):
     used = set()
     for t in short:
-        hit = next((j for j, u in enumerate(long_) if j not in used and (u == t or (len(t) >= 3 and u.startswith(t)))), None)
+        hit = next((j for j, u in enumerate(long_) if j not in used and (u == t or (len(t) >= 3 and u.startswith(t)) or (len(t) == 1 and u.startswith(t)))), None)
         if hit is None:
             return False
         used.add(hit)
@@ -527,7 +531,7 @@ def names_compatible(a, b):
     ta, tb = a.split(), b.split()
     if not ta or not tb:
         return False
-    if len(ta) > len(tb):
+    if (len(ta), sum(map(len, ta))) > (len(tb), sum(map(len, tb))):
         ta, tb = tb, ta
     return _tokens_match(ta, tb)
 
@@ -618,38 +622,7 @@ def collapse_near_dates(df):
     agg = {c: 'first' for c in multi.columns if c not in ('src', '_cid', '_ht')}
     agg['src'] = lambda x: '+'.join(sorted(set('+'.join(x).split('+'))))
     merged = multi.groupby('_cid', sort=False).agg(agg).reset_index(drop=True)
-    out = pd.concat([single, merged], ignore_index=True)
-    # Mənbələr komanda adını fərqli yazanda da eyni oyunu təkrarlamamaq üçün
-    # eyni ev/səfər istiqaməti və ±1 günlük pəncərədə yumşaq uyğunlaşdırma.
-    if len(out) < 2:
-        return out
-    out = out.sort_values('date', kind='stable').reset_index(drop=True)
-    keep = []
-    for i, row in out.iterrows():
-        match_idx = None
-        for j in reversed(keep):
-            prev = out.loc[j]
-            delta = abs((pd.Timestamp(row['date']).normalize() - pd.Timestamp(prev['date']).normalize()).days)
-            if delta > 1:
-                continue
-            if names_compatible(str(row['home_k']), str(prev['home_k'])) and names_compatible(str(row['away_k']), str(prev['away_k'])):
-                match_idx = j
-                break
-        if match_idx is None:
-            keep.append(i)
-        else:
-            # Saxlanılan sətrin boş xanalarını digər mənbədən tamamla; mənbələri birləşdir.
-            prev = out.loc[match_idx].copy()
-            for col in out.columns:
-                if col in ('src', 'date', 'home_k', 'away_k'):
-                    continue
-                a, b = prev.get(col), row.get(col)
-                if (pd.isna(a) or str(a).strip() == '') and not (pd.isna(b) or str(b).strip() == ''):
-                    prev[col] = b
-            prev['src'] = '+'.join(sorted(set(str(prev.get('src','')).split('+') + str(row.get('src','')).split('+')) - {''}))
-            # Nəticələr toqquşursa, əvvəlki (mənbə prioritetinə görə yuxarıda olan) nəticəni saxla.
-            out.loc[match_idx] = prev
-    return out.loc[keep].reset_index(drop=True)
+    return pd.concat([single, merged], ignore_index=True)
 
 
 def apply_key_map(df, kmap):
@@ -706,39 +679,50 @@ def load_sofascore():
     return out[0], out[1]
 
 
+def _sofa_day(day):
+    headers = {'User-Agent': 'Mozilla/5.0 (compatible; FootballFilter/1.0)', 'Accept': 'application/json'}
+    resp = requests.get(f'{SOFASCORE_BASE}/{day.isoformat()}', headers=headers, timeout=8)
+    resp.raise_for_status()
+    return resp.json().get('events', [])
+
+
 def refresh_sofascore():
-    """SofaScore-un ictimai, qeyri-rəsmi endpointindən son 14 gün və növbəti 21 gün üçün oyunları sınaq olaraq yükləyir.
-    Endpoint dəyişə və ya girişə məhdudiyyət qoya bilər; əsas məlumat mənbələri bundan asılı deyil."""
+    """SofaScore (qeyri-rəsmi) — son 14 gün və növbəti 21 gün, paralel sorğularla. Əlçatan deyilsə (403 və s.) xəta qaldırır, digər mənbələrə toxunmur."""
     SOFASCORE_DIR.mkdir(parents=True, exist_ok=True)
     today_ = baku_today()
-    fixtures, results = [], []
-    headers = {'User-Agent': 'Mozilla/5.0 (compatible; FootballFilter/1.0)', 'Accept': 'application/json'}
-    for offset in range(-14, 22):
-        day = today_ + timedelta(days=offset)
-        try:
-            resp = requests.get(f'{SOFASCORE_BASE}/{day.isoformat()}', headers=headers, timeout=12)
-            resp.raise_for_status()
-            events = resp.json().get('events', [])
-        except Exception:
-            continue
-        for ev in events:
+    days = [today_ + timedelta(days=o) for o in range(-14, 22)]
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futs = [ex.submit(_sofa_day, d) for d in days]
+        got, last_err = [], None
+        for f in futs:
             try:
-                home = ev.get('homeTeam', {}).get('name')
-                away = ev.get('awayTeam', {}).get('name')
-                if not home or not away:
-                    continue
+                got.append(f.result())
+            except Exception as e:
+                last_err = e
+                got.append(None)
+    if all(g is None for g in got):
+        raise RuntimeError(f'heç bir gün yüklənmədi ({last_err})')
+    fixtures, results = [], []
+    for events in got:
+        for ev in events or []:
+            try:
+                home = (ev.get('homeTeam') or {}).get('name')
+                away = (ev.get('awayTeam') or {}).get('name')
                 ts = ev.get('startTimestamp')
-                dt = pd.to_datetime(ts, unit='s', utc=True) if ts else pd.Timestamp(day)
-                tournament = ev.get('tournament', {}).get('name') or ev.get('uniqueTournament', {}).get('name') or 'SofaScore'
+                if not home or not away or not ts:
+                    continue
+                dt = pd.to_datetime(int(ts), unit='s', utc=True)
+                t = ev.get('tournament') or {}
+                league = t.get('name') or (t.get('uniqueTournament') or {}).get('name') or 'SofaScore'
                 status = (ev.get('status') or {}).get('type', '')
-                row = {'date': dt, 'time': dt.strftime('%H:%M'), 'home': home, 'away': away,
-                       'league': tournament, 'src': 'SS'}
+                # date və time ayrı yazılır (UTC) — to_baku bunları Bakı vaxtına çevirir
+                row = {'date': dt.strftime('%Y-%m-%d'), 'time': dt.strftime('%H:%M'), 'home': home, 'away': away, 'league': league}
                 hs, aw = ev.get('homeScore') or {}, ev.get('awayScore') or {}
                 if status == 'finished' and hs.get('current') is not None and aw.get('current') is not None:
                     row.update({'ft_home': hs.get('current'), 'ft_away': aw.get('current'),
                                 'ht_home': hs.get('period1'), 'ht_away': aw.get('period1')})
                     results.append(row)
-                else:
+                elif status == 'notstarted':   # oynanmayan/ləğv/təxirə salınmış oyunlar qarşıdakı sayılmasın
                     fixtures.append(row)
             except Exception:
                 continue
@@ -787,6 +771,54 @@ def merge_sources(fd, om):
     return merged, fd_only
 
 
+def _similar_names(a, b, same_day=True):
+    """Ad uyğunluğu: tam/prefiks/ixtisar ('s bratislava' ~ 'slovan bratislava'); eyni gündə əlavə olaraq yazılışca çox oxşar adlar."""
+    if names_compatible(a, b):
+        return True
+    return same_day and difflib.SequenceMatcher(None, a, b).ratio() >= 0.85
+
+
+def dedupe_games(df, has_score):
+    """Eyni oyun fərqli ad yazılışları ilə təkrar qalıbsa birləşdirir (OM / openfootball / ESPN / SofaScore arasında).
+    Şərt: tarix fərqi <= 1 gün, bir komanda eyni, digərinin adı oxşar (nəticələrdə hesab da eyni). Sürətlidir: yalnız eyni komanda+tarix cütləri müqayisə olunur."""
+    if df.empty or not {'date', 'home_k', 'away_k'} <= set(df.columns):
+        return df
+    df = df.dropna(subset=['date', 'home_k', 'away_k']).copy()
+    df['date'] = pd.to_datetime(df['date'])
+    sc = ['ft_home', 'ft_away'] if has_score and {'ft_home', 'ft_away'} <= set(df.columns) else []
+    kmap = {}
+    for same, other in (('home_k', 'away_k'), ('away_k', 'home_k')):
+        base = df[['date', same, other] + sc].drop_duplicates()
+        for off in (-1, 0, 1):
+            b = base.copy()
+            b['date'] = b['date'] + pd.Timedelta(days=off)
+            m = base.merge(b, on=['date', same], suffixes=('', '_b'))
+            m = m[m[other] != m[other + '_b']]
+            if sc:
+                m = m[(m['ft_home'] == m['ft_home_b']) & (m['ft_away'] == m['ft_away_b'])]
+            for x, y in zip(m[other], m[other + '_b']):
+                if _similar_names(x, y, same_day=(off == 0)):
+                    keep, drop = (x, y) if (len(x), x) >= (len(y), y) else (y, x)   # uzun ad qalır
+                    kmap[drop] = keep
+    def res(k):
+        n = 0
+        while k in kmap and n < 5:
+            k, n = kmap[k], n + 1
+        return k
+    if kmap:
+        best = {}
+        for side in ('home', 'away'):
+            for k, n in zip(df[side + '_k'], df[side]):
+                k2 = res(k)
+                if k2 not in best or len(str(n)) > len(str(best[k2])):
+                    best[k2] = n
+        df['home_k'], df['away_k'] = df['home_k'].map(res), df['away_k'].map(res)
+        df['home'], df['away'] = df['home_k'].map(best).fillna(df['home']), df['away_k'].map(best).fillna(df['away'])
+    agg = {c: 'first' for c in df.columns if c not in ('date', 'home_k', 'away_k', 'src')}
+    agg['src'] = lambda x: '+'.join(sorted(set('+'.join(x).split('+'))))
+    return df.groupby(['date', 'home_k', 'away_k'], as_index=False, sort=False).agg(agg)
+
+
 @st.cache_data(show_spinner=False)
 def load_data():
     fixtures, results = [], []
@@ -831,6 +863,7 @@ def load_data():
                 df_['league'] = df_['league'].map(lambda l: lmap.get(l, l))
     fix, fix_only = merge_sources(fd_fix, om_fix)
     res, res_only = merge_sources(fd_res, om_res)
+    fix, res = dedupe_games(fix, False), dedupe_games(res, True)
     fix, res = collapse_near_dates(fix), collapse_near_dates(res)
     for df_ in (fix, res):
         if not df_.empty and 'league' in df_.columns:
