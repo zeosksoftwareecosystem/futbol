@@ -503,6 +503,25 @@ def src_label(code):
     return ' + '.join(parts)
 
 
+# Eyni adlı fərqli komandalar (məs. Braziliya "Santos" və Meksika "Santos Laguna").
+# Açar: ümumi komanda açarı. Dəyər: [(liqa adında axtarılan sözlər, həmin liqalarda istifadə olunacaq açar), ...]
+# Başqa belə komanda görsən buraya əlavə et.
+AMBIGUOUS_TEAMS = {
+    'santos': [(('mex', 'concacaf', 'leagues cup', 'leagues_cup'), 'santos laguna')],
+}
+
+
+def _split_ambiguous(df, col, league_norm):
+    for key, rules in AMBIGUOUS_TEAMS.items():
+        is_key = df[col] == key
+        if not is_key.any():
+            continue
+        for words, new_key in rules:
+            m = is_key & league_norm.apply(lambda l: any(w in l for w in words))
+            df.loc[m, col] = new_key
+    return df
+
+
 def add_keys(df, src):
     if df.empty:
         return df
@@ -511,6 +530,10 @@ def add_keys(df, src):
     df['date'] = pd.to_datetime(df.get('date'), errors='coerce').dt.normalize()
     df['home_k'] = df['home'].map(team_key)
     df['away_k'] = df['away'].map(team_key)
+    if 'league' in df.columns:
+        league_norm = df['league'].fillna('').astype(str).str.lower()
+        df = _split_ambiguous(df, 'home_k', league_norm)
+        df = _split_ambiguous(df, 'away_k', league_norm)
     return df
 
 
