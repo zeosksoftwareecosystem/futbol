@@ -29,11 +29,11 @@ FD_LEAGUES = {
 FD_RENAME = {
     'HomeTeam': 'home', 'AwayTeam': 'away', 'Time': 'time',
     'FTHG': 'ft_home', 'FTAG': 'ft_away', 'HTHG': 'ht_home', 'HTAG': 'ht_away',
-    'HC': 'home_corners', 'AC': 'away_corners', 'HY': 'home_yellow', 'AY': 'away_yellow',
+    'HC': 'home_corners', 'AC': 'away_corners',
     'HS': 'home_shots', 'AS': 'away_shots', 'HST': 'home_target', 'AST': 'away_target',
 }
 FD_KEEP = ['date', 'time', 'home', 'away', 'league', 'ft_home', 'ft_away', 'ht_home', 'ht_away',
-           'home_corners', 'away_corners', 'home_yellow', 'away_yellow',
+           'home_corners', 'away_corners',
            'home_shots', 'away_shots', 'home_target', 'away_target']
 
 # ---- ESPN (üçüncü mənbə: qitə kubokları və Open Matchday-də olmayan yarışlar) ----
@@ -249,6 +249,11 @@ section[data-testid="stSidebar"] .stButton button { border-radius: 10px; font-we
 .st-key-datenav [data-testid="stColumn"], .st-key-datenav [data-testid="column"] { min-width: 0 !important; width: auto !important; flex: 1 1 0 !important; }
 .st-key-datenav [data-testid="stColumn"]:nth-child(2), .st-key-datenav [data-testid="column"]:nth-child(2) { flex: 3 1 0 !important; }
 .st-key-datenav button { min-height: 2.6rem; font-weight: 700; }
+[class*="st-key-moderow"] [data-testid="stHorizontalBlock"] { flex-direction: row !important; flex-wrap: nowrap !important; gap: .4rem !important; align-items: center !important; }
+[class*="st-key-moderow"] [data-testid="stColumn"], [class*="st-key-moderow"] [data-testid="column"] { min-width: 0 !important; width: auto !important; }
+[class*="st-key-moderow"] [data-testid="stColumn"]:nth-child(1), [class*="st-key-moderow"] [data-testid="column"]:nth-child(1) { flex: 5 1 0 !important; }
+[class*="st-key-moderow"] [data-testid="stColumn"]:nth-child(2), [class*="st-key-moderow"] [data-testid="column"]:nth-child(2) { flex: 4 1 0 !important; }
+[class*="st-key-moderow"] [data-testid="stRadio"] label p { font-size: .8rem !important; }
 @media (max-width: 700px) { .stats { grid-template-columns: 1fr; } .hero h1 { font-size: 22px; } }
 </style>
 """
@@ -880,7 +885,7 @@ def _espn_fetch_league(slug, default_name, start, end):
 
 
 def _espn_stats(slug, event_id):
-    """Bir oyunun künc və sarı kart sayını ESPN 'summary' endpointindən çıxarır. Tapılmasa boş dict qaytarır."""
+    """Bir oyunun künc, zərbə və qapıya dəqiq zərbə sayını ESPN 'summary' endpointindən çıxarır. Tapılmasa boş dict qaytarır."""
     try:
         r = requests.get(f'{ESPN_BASE}/{slug}/summary', params={'event': event_id}, timeout=25,
                          headers={'User-Agent': 'FutbolFiltri/1.0'})
@@ -907,14 +912,11 @@ def _espn_stats(slug, event_id):
                 continue
             if name in ('woncorners', 'cornerkicks', 'corners') or 'corner' in label:
                 out.setdefault(f'{side}_corners', int(val))
-            elif name == 'yellowcards' or 'yellow' in label:
-                out.setdefault(f'{side}_yellow', int(val))
             elif name == 'shotsontarget' or label in ('shots on target', 'shots on goal'):
                 out.setdefault(f'{side}_target', int(val))
             elif name == 'totalshots' or label in ('shots', 'total shots'):
                 out.setdefault(f'{side}_shots', int(val))
-    for a_, b_ in (('home_corners', 'away_corners'), ('home_yellow', 'away_yellow'),
-                   ('home_shots', 'away_shots'), ('home_target', 'away_target')):
+    for a_, b_ in (('home_corners', 'away_corners'), ('home_shots', 'away_shots'), ('home_target', 'away_target')):
         if not (a_ in out and b_ in out):
             out.pop(a_, None)
             out.pop(b_, None)
@@ -948,7 +950,7 @@ def refresh_espn():
             res_all = res_all.drop_duplicates(subset=key).set_index(key).combine_first(old.set_index(key)).reset_index()
     stats_done = stats_left = 0
     if not res_all.empty:
-        for col in ('home_corners', 'away_corners', 'home_yellow', 'away_yellow', 'home_shots', 'away_shots',
+        for col in ('home_corners', 'away_corners', 'home_shots', 'away_shots',
                     'home_target', 'away_target', 'stats_try', 'id', 'slug'):
             if col not in res_all.columns:
                 res_all[col] = float('nan')
@@ -1034,7 +1036,7 @@ if fixtures.empty:
 fixtures['date'] = pd.to_datetime(fixtures.get('date'), errors='coerce')
 if not results.empty:
     results['date'] = pd.to_datetime(results.get('date'), errors='coerce')
-for c in ['ft_home', 'ft_away', 'ht_home', 'ht_away', 'home_corners', 'away_corners', 'home_yellow', 'away_yellow',
+for c in ['ft_home', 'ft_away', 'ht_home', 'ht_away', 'home_corners', 'away_corners',
           'home_shots', 'away_shots', 'home_target', 'away_target']:
     if c in results.columns:
         results[c] = pd.to_numeric(results[c], errors='coerce')
@@ -1133,37 +1135,66 @@ with st.container(border=True):
     sel_leagues = st.session_state['lg_sel']
     st.caption(f'Seçilmiş liqa: {len(sel_leagues)} / {len(league_options)}')
 
+MODE_HELP = 'Oyunda: iki komandanın göstəricilərinin cəmi. Klub: yoxlanılan klubun öz göstəricisi (hər komanda üçün ayrıca).'
+
+
+def _mode_row(key, title=None, checkbox=None):
+    """Başlığın (və ya seçim qutusunun) sağında 'Oyunda | Klub' seçimi."""
+    try:
+        box = st.container(key='moderow_' + key)
+    except TypeError:   # köhnə Streamlit
+        box = st.container()
+    with box:
+        left, right = st.columns([5, 4])
+        on = None
+        if checkbox is not None:
+            on = left.checkbox(checkbox, key='on_' + key)
+        else:
+            left.markdown(f'**{title}**')
+        mode = right.radio('Rejim', ['Oyunda', 'Klub'], horizontal=True, key='mode_' + key, label_visibility='collapsed', help=MODE_HELP)
+    return on, mode
+
+
+def _min_input(on, mode, key, name, total_cfg, club_cfg):
+    if mode == 'Oyunda':
+        label, (default, maxv) = f'Matç üzrə minimum ümumi {name}', total_cfg
+    else:
+        label, (default, maxv) = f'Klub üzrə minimum {name} (hər oyunda)', club_cfg
+    return st.number_input(label, min_value=0, max_value=maxv, value=default, disabled=not on, key=f'min_{key}_{mode}')
+
+
 with st.container(border=True):
     st.markdown('<div class="sec">2 · Filtrlər</div>', unsafe_allow_html=True)
     cols = st.columns(3)
     with cols[0]:
-        st.markdown('**⚽ Qol filtrləri**')
+        _, goal_mode = _mode_row('goal', title='⚽ Qol filtrləri')
+        goal_lines = (2.5, 3.5, 4.5) if goal_mode == 'Oyunda' else (0.5, 1.5, 2.5)
+        goal_pref = 'Matç' if goal_mode == 'Oyunda' else 'Klub'
         btts = st.checkbox('BTTS — hər iki komanda qol vurub')
         btts_no = st.checkbox('BTTS yox — ən azı bir komanda qol vurmayıb')
-        over25 = st.checkbox('Matç 2.5 üst')
+        goal_ov1 = st.checkbox(f'{goal_pref} {goal_lines[0]} üst', key=f'goal_ov1_{goal_mode}')
         under25 = st.checkbox('Matç 2.5 alt')
-        over35 = st.checkbox('Matç 3.5 üst')
-        over45 = st.checkbox('Matç 4.5 üst')
+        goal_ov2 = st.checkbox(f'{goal_pref} {goal_lines[1]} üst', key=f'goal_ov2_{goal_mode}')
+        goal_ov3 = st.checkbox(f'{goal_pref} {goal_lines[2]} üst', key=f'goal_ov3_{goal_mode}')
     with cols[1]:
-        st.markdown('**⏱️ 1-ci hissə**')
-        ht05 = st.checkbox('1-ci hissə 0.5 üst')
+        _, ht_mode = _mode_row('ht', title='⏱️ 1-ci hissə')
+        ht_pref = '1-ci hissə' if ht_mode == 'Oyunda' else 'Klub 1-ci hissə'
+        ht05 = st.checkbox(f'{ht_pref} 0.5 üst', key=f'ht05_{ht_mode}')
         ht05_under = st.checkbox('1-ci hissə 0.5 alt (qol yoxdur)')
-        ht15 = st.checkbox('1-ci hissə 1.5 üst')
+        ht15 = st.checkbox(f'{ht_pref} 1.5 üst', key=f'ht15_{ht_mode}')
         ht15_under = st.checkbox('1-ci hissə 1.5 alt')
         ht_draw = st.checkbox('1-ci hissə heç-heçə')
     with cols[2]:
         st.markdown('**📊 Statistika**')
-        corners_on = st.checkbox('Künc zərbələri minimumu')
-        min_corners = st.number_input('Matç üzrə minimum ümumi künc', min_value=0, max_value=30, value=9, disabled=not corners_on)
-        cards_on = st.checkbox('Sarı vərəqə minimumu')
-        min_cards = st.number_input('Matç üzrə minimum sarı vərəqə', min_value=0, max_value=20, value=3, disabled=not cards_on)
-        shots_on = st.checkbox('Qapıya zərbə minimumu (ümumi zərbə)')
-        min_shots = st.number_input('Matç üzrə minimum ümumi zərbə (hər iki komanda)', min_value=0, max_value=60, value=22, disabled=not shots_on)
-        target_on = st.checkbox('Qapıya dəqiq zərbə minimumu')
-        min_target = st.number_input('Matç üzrə minimum qapıya dəqiq zərbə (hər iki komanda)', min_value=0, max_value=30, value=8, disabled=not target_on)
+        corners_on, corners_mode = _mode_row('corners', checkbox='Künc minimumu')
+        min_corners = _min_input(corners_on, corners_mode, 'corners', 'künc', (9, 30), (4, 20))
+        shots_on, shots_mode = _mode_row('shots', checkbox='Qapıya zərbə minimumu')
+        min_shots = _min_input(shots_on, shots_mode, 'shots', 'zərbə', (22, 60), (11, 40))
+        target_on, target_mode = _mode_row('target', checkbox='Qapıya dəqiq zərbə minimumu')
+        min_target = _min_input(target_on, target_mode, 'target', 'qapıya dəqiq zərbə', (8, 30), (4, 20))
     st.markdown('<div class="rule">Hər komandanın seçilən son oyunlarının <b>HAMISI</b> bütün şərtlərə uyğun olmalıdır.</div>', unsafe_allow_html=True)
 
-criteria_selected = any([btts, btts_no, ht05, ht05_under, ht15, ht15_under, ht_draw, over25, under25, over35, over45, corners_on, cards_on, shots_on, target_on])
+criteria_selected = any([btts, btts_no, ht05, ht05_under, ht15, ht15_under, ht_draw, goal_ov1, under25, goal_ov2, goal_ov3, corners_on, shots_on, target_on])
 if not criteria_selected:
     st.info('Ən azı bir filtr seç. Tarixə uyğun oyunlar aşağıda görünür, analiz üçün isə filtr lazımdır.')
 
@@ -1172,8 +1203,30 @@ def _num(df, col):
     return pd.to_numeric(df[col], errors='coerce') if col in df.columns else pd.Series(np.nan, index=df.index)
 
 
+def _lbl(mode):
+    return 'oyunda' if mode == 'Oyunda' else 'klub'
+
+
+def _atleast(d, col_h, col_a, mode, thr):
+    """'Oyunda' rejimi: iki komandanın cəmi ≥ thr. 'Klub' rejimi: hər komandanın öz göstəricisi ≥ thr (ev və qonaq üçün ayrıca)."""
+    a, b = _num(d, col_h), _num(d, col_a)
+    has = a.notna() & b.notna()
+    if mode == 'Klub':
+        return a >= thr, b >= thr, has
+    p = (a + b) >= thr
+    return p, p, has
+
+
 def active_conditions():
-    """Seçilmiş filtrlərin siyahısı: (ad, funksiya). Funksiya DataFrame alıb (şərt ödənir, lazımi məlumat var) qaytarır."""
+    """Seçilmiş filtrlərin siyahısı: (ad, funksiya). Funksiya DataFrame alıb
+    (ev sahibi baxışından ödənir, qonaq baxışından ödənir, lazımi məlumat var) qaytarır.
+    'Oyunda' rejimində iki baxış eynidir; 'Klub' rejimində hər klubun öz göstəricisi yoxlanılır."""
+    def same(fn):
+        def inner(d):
+            p, has = fn(d)
+            return p, p, has
+        return inner
+
     def ft(d):
         hg, ag = _num(d, 'ft_home'), _num(d, 'ft_away')
         return hg, ag, hg.notna() & ag.notna()
@@ -1182,91 +1235,81 @@ def active_conditions():
         a, b = _num(d, 'ht_home'), _num(d, 'ht_away')
         return a, b, a.notna() & b.notna()
 
-    def total_rule(fn):
-        return lambda d: ((lambda hg, ag, has: (fn(hg + ag), has))(*ft(d)))
-
-    def ht_rule(fn):
-        return lambda d: ((lambda a, b, has: (fn(a, b), has))(*ht(d)))
-
     conds = []
     if btts:
-        conds.append(('BTTS', lambda d: ((lambda hg, ag, has: ((hg > 0) & (ag > 0), has))(*ft(d)))))
+        conds.append(('BTTS', same(lambda d: (lambda hg, ag, has: ((hg > 0) & (ag > 0), has))(*ft(d)))))
     if btts_no:
-        conds.append(('BTTS yox', lambda d: ((lambda hg, ag, has: (~((hg > 0) & (ag > 0)), has))(*ft(d)))))
-    if over25:
-        conds.append(('Matç 2.5 üst', total_rule(lambda t: t >= 3)))
+        conds.append(('BTTS yox', same(lambda d: (lambda hg, ag, has: (~((hg > 0) & (ag > 0)), has))(*ft(d)))))
+    for on, line in ((goal_ov1, goal_lines[0]), (goal_ov2, goal_lines[1]), (goal_ov3, goal_lines[2])):
+        if on:
+            conds.append((f'{goal_pref} {line} üst ({_lbl(goal_mode)})',
+                          (lambda thr: lambda d: _atleast(d, 'ft_home', 'ft_away', goal_mode, thr))(int(line) + 1)))
     if under25:
-        conds.append(('Matç 2.5 alt', total_rule(lambda t: t <= 2)))
-    if over35:
-        conds.append(('Matç 3.5 üst', total_rule(lambda t: t >= 4)))
-    if over45:
-        conds.append(('Matç 4.5 üst', total_rule(lambda t: t >= 5)))
-    if ht05:
-        conds.append(('1-ci hissə 0.5 üst', ht_rule(lambda a, b: a + b >= 1)))
+        conds.append(('Matç 2.5 alt', same(lambda d: (lambda hg, ag, has: (hg + ag <= 2, has))(*ft(d)))))
+    for on, line in ((ht05, 0.5), (ht15, 1.5)):
+        if on:
+            conds.append((f'{ht_pref} {line} üst ({_lbl(ht_mode)})',
+                          (lambda thr: lambda d: _atleast(d, 'ht_home', 'ht_away', ht_mode, thr))(int(line) + 1)))
     if ht05_under:
-        conds.append(('1-ci hissə 0.5 alt', ht_rule(lambda a, b: a + b == 0)))
-    if ht15:
-        conds.append(('1-ci hissə 1.5 üst', ht_rule(lambda a, b: a + b >= 2)))
+        conds.append(('1-ci hissə 0.5 alt', same(lambda d: (lambda a, b, has: (a + b == 0, has))(*ht(d)))))
     if ht15_under:
-        conds.append(('1-ci hissə 1.5 alt', ht_rule(lambda a, b: a + b <= 1)))
+        conds.append(('1-ci hissə 1.5 alt', same(lambda d: (lambda a, b, has: (a + b <= 1, has))(*ht(d)))))
     if ht_draw:
-        conds.append(('1-ci hissə heç-heçə', ht_rule(lambda a, b: a == b)))
+        conds.append(('1-ci hissə heç-heçə', same(lambda d: (lambda a, b, has: (a == b, has))(*ht(d)))))
     if corners_on:
-        def _c(d):
-            a, b = _num(d, 'home_corners'), _num(d, 'away_corners')
-            return a + b >= min_corners, a.notna() & b.notna()
-        conds.append((f'Künc ≥ {int(min_corners)}', _c))
-    if cards_on:
-        def _y(d):
-            a, b = _num(d, 'home_yellow'), _num(d, 'away_yellow')
-            return a + b >= min_cards, a.notna() & b.notna()
-        conds.append((f'Sarı vərəqə ≥ {int(min_cards)}', _y))
+        conds.append((f'Künc ≥ {int(min_corners)} ({_lbl(corners_mode)})',
+                      lambda d: _atleast(d, 'home_corners', 'away_corners', corners_mode, min_corners)))
     if shots_on:
-        def _s(d):
-            a, b = _num(d, 'home_shots'), _num(d, 'away_shots')
-            return a + b >= min_shots, a.notna() & b.notna()
-        conds.append((f'Qapıya zərbə ≥ {int(min_shots)}', _s))
+        conds.append((f'Qapıya zərbə ≥ {int(min_shots)} ({_lbl(shots_mode)})',
+                      lambda d: _atleast(d, 'home_shots', 'away_shots', shots_mode, min_shots)))
     if target_on:
-        def _t(d):
-            a, b = _num(d, 'home_target'), _num(d, 'away_target')
-            return a + b >= min_target, a.notna() & b.notna()
-        conds.append((f'Qapıya dəqiq zərbə ≥ {int(min_target)}', _t))
+        conds.append((f'Qapıya dəqiq zərbə ≥ {int(min_target)} ({_lbl(target_mode)})',
+                      lambda d: _atleast(d, 'home_target', 'away_target', target_mode, min_target)))
     return conds
 
 
-def match_pass_vec(df):
-    """Hər sətir (keçmiş oyun) bütün seçilmiş şərtlərə uyğundurmu? Məlumat çatmırsa uyğun sayılmır."""
+def side_pass_vec(df):
+    """Hər keçmiş oyun üçün iki cavab: ev sahibi klub baxışından və qonaq klub baxışından bütün seçilmiş şərtlər ödənirmi?
+    Məlumat çatmırsa ödənmir sayılır."""
     ok = _num(df, 'ft_home').notna() & _num(df, 'ft_away').notna()
+    ph, pa = ok.copy(), ok.copy()
     for _, fn in active_conditions():
-        p, has = fn(df)
-        ok = ok & p.fillna(False) & has
-    return ok
+        p_h, p_a, has = fn(df)
+        ph = ph & p_h.fillna(False) & has
+        pa = pa & p_a.fillna(False) & has
+    return ph, pa
+
+
+def match_pass_vec(df):
+    """Oyunun özü hər iki klub baxışından şərtləri ödəyirmi (geriyə testdə 'tutdu' sayılması üçün)."""
+    ph, pa = side_pass_vec(df)
+    return ph & pa
 
 
 def has_data_vec(df):
-    """Seçilmiş şərtləri yoxlamaq üçün lazımi məlumat (hesab, 1-ci hissə, künc, kart) var?"""
+    """Seçilmiş şərtləri yoxlamaq üçün lazımi məlumat (hesab, 1-ci hissə, künc, zərbə) var?"""
     ok = _num(df, 'ft_home').notna() & _num(df, 'ft_away').notna()
     for _, fn in active_conditions():
-        ok = ok & fn(df)[1]
+        ok = ok & fn(df)[2]
     return ok
 
 
 def conditions_contradict():
-    """Seçilmiş hesab filtrləri heç bir mümkün hesabla eyni anda ödənə bilməzsə True."""
+    """Seçilmiş filtrlər heç bir mümkün hesab/statistika ilə (heç bir klub baxışından) eyni anda ödənə bilməzsə True."""
     rows = [(hg, ag, a, b) for hg in range(8) for ag in range(8) for a in range(hg + 1) for b in range(ag + 1)]
     g = pd.DataFrame(rows, columns=['ft_home', 'ft_away', 'ht_home', 'ht_away'])
-    g['home_corners'] = g['away_corners'] = g['home_yellow'] = g['away_yellow'] = 99
-    g['home_shots'] = g['away_shots'] = g['home_target'] = g['away_target'] = 99
-    return not bool(match_pass_vec(g).any())
+    g['home_corners'] = g['away_corners'] = g['home_shots'] = g['away_shots'] = g['home_target'] = g['away_target'] = 99
+    ph, pa = side_pass_vec(g)
+    return not bool((ph | pa).any())
 
 
 def backtest_qualified(R, n):
-    """R: nəticələr (sütunlar: date, home_k, away_k, flag). Hər oyun üçün: oyundan əvvəl hər iki komandanın son n oyununun HAMISI flag=True idi?
+    """R: nəticələr (sütunlar: date, home_k, away_k, flag_h, flag_a). Hər oyun üçün: oyundan əvvəl hər iki komandanın son n oyununun HAMISI flag=True idi?
     (Əsas analizdəki team_last məntiqi ilə eyni, lakin hamısı bir dəfəyə hesablanır.)"""
     R = R.reset_index(drop=True)
     L = pd.concat([
-        pd.DataFrame({'rid': R.index, 'team': R['home_k'], 'date': R['date'], 'flag': R['flag'].astype(int), 'side': 'h'}),
-        pd.DataFrame({'rid': R.index, 'team': R['away_k'], 'date': R['date'], 'flag': R['flag'].astype(int), 'side': 'a'}),
+        pd.DataFrame({'rid': R.index, 'team': R['home_k'], 'date': R['date'], 'flag': R['flag_h'].astype(int), 'side': 'h'}),
+        pd.DataFrame({'rid': R.index, 'team': R['away_k'], 'date': R['date'], 'flag': R['flag_a'].astype(int), 'side': 'a'}),
     ], ignore_index=True).sort_values(['team', 'date', 'rid'], kind='stable').reset_index(drop=True)
     g = L.groupby('team')
     cs = g['flag'].cumsum()
@@ -1276,6 +1319,11 @@ def backtest_qualified(R, n):
     okh = L[L['side'] == 'h'].set_index('rid')['ok'].reindex(R.index).fillna(False)
     oka = L[L['side'] == 'a'].set_index('rid')['ok'].reindex(R.index).fillna(False)
     return (okh & oka).values
+
+
+def _team_ok(hist, team_k):
+    """Komandanın seçilmiş son oyunlarının hamısı filtrə uyğundurmu? Hər oyun komandanın öz baxışından (ev/qonaq) yoxlanılır."""
+    return bool(np.where(hist['home_k'] == team_k, hist['_pass_h'], hist['_pass_a']).all())
 
 
 def team_last(team_k, date):
@@ -1301,7 +1349,7 @@ if run_clicked or (auto_run and criteria_selected):
         st.warning('Seçilmiş filtrlər bir-birinə ziddir (məsələn "2.5 üst" və "2.5 alt"), heç bir oyun uyğun gəlməyəcək. Filtrləri dəyiş.')
         st.stop()
     today = baku_today()
-    results['_pass'] = match_pass_vec(results)   # keçmiş oyunların hər biri filtrə uyğundurmu (bir dəfə hesablanır)
+    results['_pass_h'], results['_pass_a'] = side_pass_vec(results)   # keçmiş oyunların hər biri filtrə uyğundurmu (bir dəfə hesablanır)
     target_cols = ['date', 'time', 'home', 'away', 'league', 'home_k', 'away_k', 'src']
     fixture_targets = fixtures[
         (fixtures['date'].dt.date >= date_from) &
@@ -1342,7 +1390,7 @@ if run_clicked or (auto_run and criteria_selected):
             skipped += 1
             progress.progress((i + 1) / len(day_games))
             continue
-        if hhist['_pass'].all() and ahist['_pass'].all():
+        if _team_ok(hhist, game['home_k']) and _team_ok(ahist, game['away_k']):
             passed.append({
                 'Tarix': date.strftime('%Y-%m-%d'),
                 'Saat': str(game.get('time', '')),
@@ -1402,9 +1450,6 @@ if run_clicked or (auto_run and criteria_selected):
                             hcn, acn = old_match.get('home_corners'), old_match.get('away_corners')
                             if pd.notna(hcn) and pd.notna(acn):
                                 chips += f'<span class="chip c">Künc {int(hcn + acn)}</span>'
-                            hyc, ayc = old_match.get('home_yellow'), old_match.get('away_yellow')
-                            if pd.notna(hyc) and pd.notna(ayc):
-                                chips += f'<span class="chip y">Sarı {int(hyc + ayc)}</span>'
                             hsh, ash = old_match.get('home_shots'), old_match.get('away_shots')
                             hst_, ast_ = old_match.get('home_target'), old_match.get('away_target')
                             if pd.notna(hsh) and pd.notna(ash):
@@ -1452,13 +1497,12 @@ with st.expander('📈 Geriyə test — seçilmiş filtr keçmişdə neçə faiz
         st.warning('Heç bir liqa seçilməyib.')
     else:
         try:
-            bt_key = (tuple(n for n, _ in active_conditions()), int(min_corners) if corners_on else 0, int(min_cards) if cards_on else 0,
-                      int(min_shots) if shots_on else 0, int(min_target) if target_on else 0,
-                      int(n_games), len(results), str(results['date'].max()), str(baku_today()))
+            bt_key = (tuple(n for n, _ in active_conditions()), int(n_games), len(results), str(results['date'].max()), str(baku_today()))
             if st.session_state.get('bt_cache_key') != bt_key:
                 with st.spinner('Geriyə test hesablanır...'):
                     R = results.copy().reset_index(drop=True)
-                    R['flag'] = match_pass_vec(R)
+                    R['flag_h'], R['flag_a'] = side_pass_vec(R)
+                    R['flag'] = R['flag_h'] & R['flag_a']
                     R['has'] = has_data_vec(R)
                     R['qual'] = backtest_qualified(R, int(n_games))
                     st.session_state['bt_cache'], st.session_state['bt_cache_key'] = R, bt_key
@@ -1496,7 +1540,7 @@ with st.expander('📈 Geriyə test — seçilmiş filtr keçmişdə neçə faiz
                            + (' ⚠️ Nümunə kiçikdir (30-dan az oyun), nəticəyə etibar etmə.' if len(Q) < 30 else ''))
                 conds = active_conditions()
                 if len(conds) > 1:
-                    rows = [{'Şərt': name, 'Faiz': round(float((fn(Q)[0] & fn(Q)[1]).mean() * 100), 1)} for name, fn in conds]
+                    rows = [{'Şərt': name, 'Faiz': round(float((lambda r: (r[0] & r[1] & r[2]).mean())(fn(Q)) * 100), 1)} for name, fn in conds]
                     st.markdown('**Şərtlər üzrə (uyğun oyunlarda ayrı-ayrılıqda)**')
                     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
                 by = Q.groupby('league').agg(Oyun=('flag', 'size'), Uyğun=('flag', 'sum')).reset_index()
@@ -1509,7 +1553,7 @@ with st.expander('📈 Geriyə test — seçilmiş filtr keçmişdə neçə faiz
 
 with st.expander('Məlumat bazası haqqında'):
     st.write(f'Çempionat qovluqları: {len(list(DATA_DIR.iterdir())) if DATA_DIR.exists() else 0}. Qarşıdakı oyun sətri: {len(fixtures)}. Tarixi nəticə sətri: {len(results)}. Siyahıdakı liqa sayı: {len(league_options)}.')
-    st.write('Mənbələr: Open Matchday — https://github.com/oladeeayo/open-matchday, football-data.co.uk (əsas və əlavə liqalar), openfootball (https://github.com/openfootball/football.json), international_results (https://github.com/martj42/international_results, milli komandalar) və ESPN (qitə kubokları, daxili kuboklar və onlarla liqa; yarımvaxt, künc və sarı kart ESPN-dən də çıxarılır). Eyni oyun bir neçə mənbədə varsa statistika üçün əvvəlcə football-data.co.uk, sonra Open Matchday, sonra openfootball, sonra ESPN götürülür. Künc, sarı vərəqə, zərbə və qapıya dəqiq zərbə statistikası football-data.co.uk əsas liqalarında, Open Matchday-də və ESPN-in yüklədiyi oyunlarda var. Statistikası olmayan oyunlar müvafiq statistik filtrdə uyğun sayılmır.')
+    st.write('Mənbələr: Open Matchday — https://github.com/oladeeayo/open-matchday, football-data.co.uk (əsas və əlavə liqalar), openfootball (https://github.com/openfootball/football.json), international_results (https://github.com/martj42/international_results, milli komandalar) və ESPN (qitə kubokları, daxili kuboklar və onlarla liqa; yarımvaxt, künc, zərbə və qapıya dəqiq zərbə ESPN-dən də çıxarılır). Eyni oyun bir neçə mənbədə varsa statistika üçün əvvəlcə football-data.co.uk, sonra Open Matchday, sonra openfootball, sonra ESPN götürülür. Künc, zərbə və qapıya dəqiq zərbə statistikası football-data.co.uk əsas liqalarında, Open Matchday-də və ESPN-in yüklədiyi oyunlarda var. Statistikası olmayan oyunlar müvafiq statistik filtrdə uyğun sayılmır.')
     st.write(f'Əlavə liqa faylları (football-data.co.uk/new): {len(list(FDX_DIR.glob("*.csv"))) if FDX_DIR.exists() else 0}. openfootball faylları: {len(list(OF_DIR.glob("*.json"))) if OF_DIR.exists() else 0}.')
     if FD_DIR.exists() and any(FD_DIR.glob('*.csv')):
         st.write(f'football-data.co.uk faylları: {len(list(FD_DIR.glob("*.csv")))}.')
