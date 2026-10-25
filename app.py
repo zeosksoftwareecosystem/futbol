@@ -1150,6 +1150,70 @@ def refresh_espn():
     return len(res_all), len(fix_new), failed, stats_done, stats_left
 
 
+# ---- Canlı və bu gün bitmiş oyunların hesabı (ESPN scoreboard, yalnız oyunda/bitmiş statuslar) ----
+LIVE_EXTRA_SLUGS = ['eng.1', 'eng.2', 'esp.1', 'esp.2', 'ger.1', 'ger.2', 'ita.1', 'ita.2', 'fra.1', 'fra.2',
+                    'ned.1', 'por.1', 'tur.1', 'sco.1', 'bel.1', 'gre.1']   # yanlış kod 404 verir və səssizcə atlanır
+
+
+def _live_one(slug):
+    t0 = datetime.utcnow().date()
+    rng = f"{(t0 - timedelta(days=1)).strftime('%Y%m%d')}-{(t0 + timedelta(days=1)).strftime('%Y%m%d')}"
+    try:
+        r = requests.get(f'{ESPN_BASE}/{slug}/scoreboard', params={'dates': rng, 'limit': 300}, timeout=12,
+                         headers={'User-Agent': 'FutbolFiltri/1.0'})
+        if r.status_code != 200:
+            return []
+        data = r.json()
+    except (requests.RequestException, ValueError):
+        return []
+    out = []
+    for ev in data.get('events', []) or []:
+        try:
+            comp = ev['competitions'][0]
+            sides = {c['homeAway']: c for c in comp['competitors']}
+            h, a = sides['home'], sides['away']
+            stt = ev['status']['type']
+            state = stt.get('state', '')
+            if state == 'post' and not stt.get('completed'):
+                continue   # təxirə salınmış / ləğv edilmiş
+            if state not in ('in', 'post'):
+                continue
+            hs, as_ = _espn_score(h.get('score')), _espn_score(a.get('score'))
+            if pd.isna(hs) or pd.isna(as_):
+                continue
+            d = pd.to_datetime(ev['date'], utc=True).tz_localize(None).normalize()
+            detail = str(stt.get('shortDetail') or ev['status'].get('displayClock') or '').strip()
+            out.append({'home': h['team']['displayName'], 'away': a['team']['displayName'], 'hs': int(hs), 'as': int(as_),
+                        'live': state == 'in', 'detail': detail, 'date': d})
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+    return out
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_live_scores():
+    slugs = list(dict.fromkeys(list(ESPN_LEAGUES) + LIVE_EXTRA_SLUGS))
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        parts = list(ex.map(_live_one, slugs))
+    rows = [r for p in parts for r in p]
+    for r in rows:
+        r['home_k'], r['away_k'] = team_key(r['home']), team_key(r['away'])
+    return rows
+
+
+def lookup_score(hk, ak, date, res_idx, live_rows):
+    """Oyunun hesabı: əvvəl canlı mənbə (ən təzə), sonra nəticələr bazası. Qaytarır (hesab, status) və ya ('', '')."""
+    for r in live_rows:
+        if abs((r['date'] - date).days) > 1:
+            continue
+        if (r['home_k'] == hk and r['away_k'] == ak) or (names_compatible(r['home_k'], hk) and names_compatible(r['away_k'], ak)):
+            return f"{r['hs']}–{r['as']}", (f"Canlı · {r['detail']}" if r['live'] else 'Bitib')
+    for d, fh, fa in res_idx.get((hk, ak), []):
+        if abs((d - date).days) <= 1:
+            return f'{fh}–{fa}', 'Bitib'
+    return '', ''
+
+
 with st.sidebar:
     st.header('Məlumat bazası')
     if 'refresh_msgs' in st.session_state:
@@ -1625,6 +1689,8 @@ if run_clicked or (auto_run and criteria_selected):
         if _team_ok(hhist, game['home_k']) and _team_ok(ahist, game['away_k']):
             passed.append({
                 'Tarix': date.strftime('%Y-%m-%d'),
+                '_hk': game['home_k'],
+                '_ak': game['away_k'],
                 'Saat': str(game.get('time', '')),
                 'Çempionat': league,
                 'Mənbə': src_label(game.get('src', '')),
@@ -1636,6 +1702,21 @@ if run_clicked or (auto_run and criteria_selected):
             })
         progress.progress((i + 1) / len(day_games))
     progress.empty()
+    if passed:
+        res_idx = {}
+        lo, hi = pd.Timestamp(date_from) - pd.Timedelta(days=1), pd.Timestamp(date_to) + pd.Timedelta(days=1)
+        rr = results.loc[(results['date'] >= lo) & (results['date'] <= hi), ['home_k', 'away_k', 'date', 'ft_home', 'ft_away']]
+        for hk_, ak_, d_, fh_, fa_ in rr.itertuples(index=False):
+            res_idx.setdefault((hk_, ak_), []).append((d_, int(fh_), int(fa_)))
+        live_rows = []
+        if any(pd.to_datetime(it['Tarix']).date() >= today - timedelta(days=1) for it in passed):
+            with st.spinner('Canlı hesablar yoxlanılır...'):
+                try:
+                    live_rows = fetch_live_scores()
+                except Exception:
+                    live_rows = []
+        for it in passed:
+            it['Hesab'], it['Status'] = lookup_score(it['_hk'], it['_ak'], pd.to_datetime(it['Tarix']), res_idx, live_rows)
     st.markdown(
         f'<div class="stats">'
         f'<div class="stat"><div class="n">{len(day_games)}</div><div class="l">Yoxlanılan oyun</div></div>'
@@ -1656,7 +1737,12 @@ if run_clicked or (auto_run and criteria_selected):
                 time_text = 'Saat məlum deyil'
             league_text = str(item.get('Çempionat', '')).replace('_', ' ').replace('-', ' ').strip()
             title = f"⚽ {item['Tarix']} · {time_text} · {item['Ev sahibi']} — {item['Qonaq']}"
+            _live = str(item.get('Status', '')).startswith('Canlı')
+            if item.get('Hesab'):
+                title += f" · {'🔴' if _live else '✅'} {item['Hesab']}"
             with st.expander(title, expanded=False):
+                if item.get('Hesab'):
+                    st.markdown(f"**{'🔴' if _live else '✅'} {item['Hesab']}** · {item['Status']}")
                 st.caption(f"{league_text} · Hər komandanın son {item['Son oyun sayı']} oyunu · Mənbə: {item['Mənbə'] or 'məlum deyil'}")
                 left, right = st.columns(2)
                 for col, team_name, history_key in [
@@ -1700,7 +1786,7 @@ if run_clicked or (auto_run and criteria_selected):
                                 f'<div>{chips}</div></div>',
                                 unsafe_allow_html=True
                             )
-        out = out.drop(columns=['Ev sahibinin əvvəlki nəticələri', 'Qonağın əvvəlki nəticələri'])
+        out = out.drop(columns=['Ev sahibinin əvvəlki nəticələri', 'Qonağın əvvəlki nəticələri', '_hk', '_ak'])
         st.download_button('⬇️ Nəticələri CSV kimi yüklə', out.to_csv(index=False).encode('utf-8-sig'), file_name='futbol_filtri_neticeleri.csv', mime='text/csv')
     else:
         st.info('Seçilən şərtlərə uyğun oyun tapılmadı. Tarix aralığını genişləndir və ya filtrləri dəyiş.')
