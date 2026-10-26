@@ -81,7 +81,7 @@ ESPN_LEAGUES = {
     'fifa.friendly': 'International Friendly', 'uefa.nations': 'UEFA Nations League',
     'uefa.euroq': 'UEFA Euro Qualifying', 'concacaf.nations.league': 'CONCACAF Nations League',
 }
-ESPN_STATS_PER_REFRESH = 300   # hər yeniləmədə neçə oyun üçün künc/kart statistikası yüklənsin (qalanı növbəti yeniləmələrdə)
+ESPN_STATS_PER_REFRESH = 1000   # hər yeniləmədə neçə oyun üçün künc/kart statistikası yüklənsin (qalanı növbəti yeniləmələrdə)
 ESPN_STATS_MAX_TRIES = 2       # statistikası gəlməyən oyun üçün neçə dəfə cəhd olunsun
 
 # ---- football-data.co.uk "Extra Leagues" (yalnız hesab; qeyd: hər fayl bütün mövsümləri saxlayır) ----
@@ -1022,7 +1022,7 @@ def _espn_fetch_league(slug, default_name, start, end):
 def _espn_stats(slug, event_id):
     """Bir oyunun künc, zərbə və qapıya dəqiq zərbə sayını ESPN 'summary' endpointindən çıxarır. Tapılmasa boş dict qaytarır."""
     try:
-        r = requests.get(f'{ESPN_BASE}/{slug}/summary', params={'event': event_id}, timeout=25,
+        r = requests.get(f'{ESPN_BASE}/{slug}/summary', params={'event': event_id}, timeout=15,
                          headers={'User-Agent': 'FutbolFiltri/1.0'})
         if r.status_code != 200:
             return {}
@@ -1096,7 +1096,7 @@ def refresh_espn():
         pend = res_all[need].sort_values('date', ascending=False).head(ESPN_STATS_PER_REFRESH)
         stats_left = int(need.sum()) - len(pend)
         if not pend.empty:
-            with ThreadPoolExecutor(max_workers=8) as ex:
+            with ThreadPoolExecutor(max_workers=16) as ex:
                 got = list(ex.map(lambda t: _espn_stats(t[0], t[1]), zip(pend['slug'], pend['id'])))
             for idx, st_ in zip(pend.index, got):
                 res_all.at[idx, 'stats_try'] += 1
@@ -1758,19 +1758,22 @@ def analyze(n, date_from, date_to, sel_leagues, all_leagues):
         for it in passed:
             d0 = pd.to_datetime(it['Tarix'])
             r = next((r_ for r_ in stat_idx.get((it['_hk'], it['_ak']), []) if abs((r_['date'] - d0).days) <= 1), None)
+            if r is None and d0.date() >= today:   # hələ oynanmamış oyun — göstəriləcək statistika yoxdur
+                it['Statistika'] = ''
+                continue
             parts = []
-            if r is not None:
-                if want_corners and (c := _pair(r, 'home_corners', 'away_corners')):
-                    parts.append(f'Künc {c[0]}–{c[1]} ({c[0] + c[1]})')
-                if want_shots and (c := _pair(r, 'home_shots', 'away_shots')):
-                    parts.append(f'Zərbə {c[0]}–{c[1]} ({c[0] + c[1]})')
-                if want_target and (c := _pair(r, 'home_target', 'away_target')):
-                    parts.append(f'Qapıya {c[0]}–{c[1]} ({c[0] + c[1]})')
-                if want_score or not parts:
-                    ft = _pair(r, 'ft_home', 'ft_away')
-                    ht = _pair(r, 'ht_home', 'ht_away')
-                    if ft:
-                        parts.append(f'{ft[0]}–{ft[1]}' + (f' (1-ci hissə {ht[0]}–{ht[1]})' if ht else ''))
+            r = r or {}
+            for want, a, b, label in ((want_corners, 'home_corners', 'away_corners', 'Künc'),
+                                      (want_shots, 'home_shots', 'away_shots', 'Zərbə'),
+                                      (want_target, 'home_target', 'away_target', 'Qapıya')):
+                if want:
+                    c = _pair(r, a, b)
+                    parts.append(f'{label} {c[0]}–{c[1]} ({c[0] + c[1]})' if c else f'{label}: statistika yoxdur')
+            if want_score or not parts:
+                ft = _pair(r, 'ft_home', 'ft_away')
+                ht = _pair(r, 'ht_home', 'ht_away')
+                if ft:
+                    parts.append(f'{ft[0]}–{ft[1]}' + (f' (1-ci hissə {ht[0]}–{ht[1]})' if ht else ''))
             it['Statistika'] = ' · '.join(parts)
     return {'passed': passed, 'checked': len(dg), 'skipped': skipped,
             'filters': [n_ for n_, _ in active_conditions()], 'n_games': int(n),
