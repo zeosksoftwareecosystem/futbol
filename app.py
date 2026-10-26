@@ -1878,6 +1878,32 @@ def hist_cards_html(records):
 
 def render_analysis(A, cur_key):
     passed = A['passed']
+    # Sıralama: başlamayan oyunlar (ən tez başlayacaq əvvəl), sonra canlı oyunlar,
+    # sonda bitmiş oyunlar (ən yeni tarix əvvəl).
+    try:
+        _now_sort = pd.Timestamp.now(tz='Asia/Baku').tz_localize(None)
+        def _match_sort_key(_item):
+            _date = pd.to_datetime(_item.get('Tarix'), errors='coerce')
+            _time_raw = str(_item.get('Saat', '')).strip()
+            _time = pd.to_datetime(_time_raw, format='%H:%M', errors='coerce') if _time_raw.lower() not in ('', 'nan', 'nat', 'none', 'saat məlum deyil') else pd.NaT
+            if pd.notna(_date):
+                _dt = pd.Timestamp(_date.date())
+                if pd.notna(_time):
+                    _dt += pd.Timedelta(hours=_time.hour, minutes=_time.minute)
+            else:
+                _dt = pd.Timestamp.max
+            _status = str(_item.get('Status', '')).strip().lower()
+            if _status.startswith('canlı'):
+                return (1, _dt)
+            if _status == 'bitib' or _item.get('Hesab'):
+                return (2, -_dt.value if _dt != pd.Timestamp.max else 0)
+            if _dt >= _now_sort:
+                return (0, _dt.value)
+            # Keçmiş tarixli, statusu müəyyən edilməyən oyunları bitmiş oyunlar bölməsinə sal.
+            return (2, -_dt.value if _dt != pd.Timestamp.max else 0)
+        passed.sort(key=_match_sort_key)
+    except Exception:
+        pass
     st.markdown(
         f'<div class="stats">'
         f'<div class="stat"><div class="n">{A["checked"]}</div><div class="l">Yoxlanılan oyun</div></div>'
