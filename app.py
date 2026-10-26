@@ -1277,8 +1277,7 @@ if not st.session_state.get('_qp_restored'):
                     st.session_state[_k] = datetime.strptime(_v, '%Y-%m-%d').date()
                 continue
             st.session_state[_k] = True if _v == 'True' else (int(_v) if _v.lstrip('-').isdigit() else _v)
-        if st.session_state.get('_ran'):
-            st.session_state['auto_run'] = True   # yeniləmədən əvvəl analiz aparılıbsa, nəticələr avtomatik yenidən hesablanır
+        # Əvvəlki analiz olması yeni açılışda avtomatik analiz başlatmır.
     except Exception:
         pass
     st.session_state['_qp_restored'] = True
@@ -1355,13 +1354,13 @@ def _shift_dates(days):
     else:
         st.session_state['d_from'] = st.session_state['d_from'] + timedelta(days=days)
         st.session_state['d_to'] = st.session_state['d_to'] + timedelta(days=days)
-    st.session_state['auto_run'] = True
+    # Tarix dəyişəndə analiz avtomatik başlamır; istifadəçi düyməni özü basır.
 
 
 def _shift_one_date(key, days):
     # Başlanğıc və son tarixi ayrıca əvvəlki/növbəti günə keçir.
     st.session_state[key] = st.session_state[key] + timedelta(days=days)
-    st.session_state['auto_run'] = True
+    # Tək tarixi dəyişmək analiz başlatmır.
 
 
 with st.container(border=True):
@@ -1893,11 +1892,11 @@ def render_analysis(A, cur_key):
 
 
 run_clicked = st.button('🔎 Oyunları analiz et', type='primary', key='analyze_button')
-auto_run = st.session_state.pop('auto_run', False)   # ◀ ▶ düymələri və səhifə yenilənməsi sonrası analiz avtomatik işləyir
 cur_key = (tuple(n for n, _ in active_conditions()) if criteria_selected else (), int(n_games), str(date_from), str(date_to),
            len(sel_leagues), len(results), str(results['date'].max()))
 
-if run_clicked or (auto_run and criteria_selected):
+# Analiz yalnız istifadəçi düyməni basanda işə düşür.
+if run_clicked:
     problem = None
     if date_from > date_to:
         problem = ('error', 'Başlanğıc tarixi son tarixdən böyük ola bilməz.')
