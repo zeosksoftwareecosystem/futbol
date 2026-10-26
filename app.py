@@ -204,7 +204,7 @@ def league_search_blob(name):
     return base + ' ' + ' '.join(extra)
 
 
-st.set_page_config(page_title='Futbol Filtri v6', page_icon='⚽', layout='wide')
+st.set_page_config(page_title='Futbol Filtri v7', page_icon='⚽', layout='wide')
 
 CSS = """
 <style>
@@ -503,25 +503,6 @@ def src_label(code):
     return ' + '.join(parts)
 
 
-# Eyni adlı fərqli komandalar (məs. Braziliya "Santos" və Meksika "Santos Laguna").
-# Açar: ümumi komanda açarı. Dəyər: [(liqa adında axtarılan sözlər, həmin liqalarda istifadə olunacaq açar), ...]
-# Başqa belə komanda görsən buraya əlavə et.
-AMBIGUOUS_TEAMS = {
-    'santos': [(('mex', 'concacaf', 'leagues cup', 'leagues_cup'), 'santos laguna')],
-}
-
-
-def _split_ambiguous(df, col, league_norm):
-    for key, rules in AMBIGUOUS_TEAMS.items():
-        is_key = df[col] == key
-        if not is_key.any():
-            continue
-        for words, new_key in rules:
-            m = is_key & league_norm.apply(lambda l: any(w in l for w in words))
-            df.loc[m, col] = new_key
-    return df
-
-
 def add_keys(df, src):
     if df.empty:
         return df
@@ -530,10 +511,6 @@ def add_keys(df, src):
     df['date'] = pd.to_datetime(df.get('date'), errors='coerce').dt.normalize()
     df['home_k'] = df['home'].map(team_key)
     df['away_k'] = df['away'].map(team_key)
-    if 'league' in df.columns:
-        league_norm = df['league'].fillna('').astype(str).str.lower()
-        df = _split_ambiguous(df, 'home_k', league_norm)
-        df = _split_ambiguous(df, 'away_k', league_norm)
     return df
 
 
@@ -842,8 +819,8 @@ def dedupe_games(df, has_score):
     return df.groupby(['date', 'home_k', 'away_k'], as_index=False, sort=False).agg(agg)
 
 
-@st.cache_resource(show_spinner=False)
-def load_data(use_ss=False):
+@st.cache_data(show_spinner=False)
+def load_data():
     fixtures, results = [], []
     for f in DATA_DIR.glob('*/*.csv'):
         try:
@@ -864,7 +841,7 @@ def load_data(use_ss=False):
     es_fix, es_res = load_espn()
     om_fix = combine_sources(om_fix, add_keys(es_fix, 'ES'))
     om_res = combine_sources(om_res, add_keys(es_res, 'ES'))
-    ss_fix, ss_res = load_sofascore() if use_ss else (pd.DataFrame(), pd.DataFrame())
+    ss_fix, ss_res = load_sofascore()
     om_fix = combine_sources(om_fix, add_keys(ss_fix, 'SS'))
     om_res = combine_sources(om_res, add_keys(ss_res, 'SS'))
     fd_fix, fd_res = load_fd()
@@ -891,16 +868,6 @@ def load_data(use_ss=False):
     for df_ in (fix, res):
         if not df_.empty and 'league' in df_.columns:
             df_['league'] = df_['league'].map(pretty_league)
-    # Hazırlıq addımları (əvvəl hər klikdə təkrarlanırdı) — indi yalnız bir dəfə
-    if not fix.empty:
-        fix['date'] = pd.to_datetime(fix.get('date'), errors='coerce')
-    if not res.empty:
-        res['date'] = pd.to_datetime(res.get('date'), errors='coerce')
-        for c in ['ft_home', 'ft_away', 'ht_home', 'ht_away', 'home_corners', 'away_corners',
-                  'home_shots', 'away_shots', 'home_target', 'away_target']:
-            if c in res.columns:
-                res[c] = pd.to_numeric(res[c], errors='coerce')
-        res = res.dropna(subset=['date', 'home', 'away', 'ft_home', 'ft_away']).reset_index(drop=True)
     return fix, res, sorted(set(fix_only) | set(res_only))
 
 
@@ -1247,31 +1214,6 @@ def lookup_score(hk, ak, date, res_idx, live_rows):
     return '', ''
 
 
-# ---- Filtrlərin URL-də saxlanması: səhifə yenilənəndə (başqa appdan qayıdanda) quşlar itməsin ----
-FILTERS_FILE = ROOT / 'saved_filters.json'
-_PKEYS = {'_ran', 'btts', 'btts_no', 'under25', 'ht05_under', 'ht15_under', 'ht_draw', 'n_games', 'use_ss'}
-_PPREF = ('match_', 'club_', 'min_', 'on_', 'mode_', 'corners_', 'shots_', 'target_')
-if not st.session_state.get('_qp_restored'):
-    try:
-        _saved = {k: v for k, v in dict(st.query_params).items() if k.startswith('f_')}
-        if not _saved and FILTERS_FILE.exists():   # ünvanda filtr yoxdursa (ana ekran ikonu ilə açılış) — serverdə saxlanmış sonuncu filtrlər
-            _saved = json.loads(FILTERS_FILE.read_text(encoding='utf-8'))
-        _same_day = _saved.get('f__saved_on') == baku_today().isoformat()
-        for _k, _v in _saved.items():
-            _k = _k[2:]
-            if _k == '_saved_on':
-                continue
-            if _k in ('d_from', 'd_to'):   # tarixlər yalnız eyni gün içində bərpa olunur
-                if _same_day:
-                    st.session_state[_k] = datetime.strptime(_v, '%Y-%m-%d').date()
-                continue
-            st.session_state[_k] = True if _v == 'True' else (int(_v) if _v.lstrip('-').isdigit() else _v)
-        if st.session_state.get('_ran'):
-            st.session_state['auto_run'] = True   # yeniləmədən əvvəl analiz aparılıbsa, nəticələr avtomatik yenidən hesablanır
-    except Exception:
-        pass
-    st.session_state['_qp_restored'] = True
-
 with st.sidebar:
     st.header('Məlumat bazası')
     if 'refresh_msgs' in st.session_state:
@@ -1324,13 +1266,21 @@ with st.sidebar:
                 msgs.append(('warning', f'SofaScore sınaq mənbəyi əlçatan olmadı: {e}. Digər mənbələr işləməyə davam edir.'))
         st.session_state['refresh_msgs'] = msgs
         st.rerun()
-    use_ss = st.checkbox('SofaScore sınaq mənbəyini istifadə et (analizi yavaşladır)', value=False, key='use_ss')
     st.caption('Yeniləmə internet tələb edir. Əvvəl yüklənmiş məlumatlar internet olmadan da analiz edilə bilər.')
 
-fixtures, results, fd_only_teams = load_data(use_ss)
+fixtures, results, fd_only_teams = load_data()
 if fixtures.empty:
     st.error('Oyun cədvəlləri tapılmadı. ZIP-i tam çıxartdığını yoxla və ya sol paneldən yenilə.')
     st.stop()
+
+fixtures['date'] = pd.to_datetime(fixtures.get('date'), errors='coerce')
+if not results.empty:
+    results['date'] = pd.to_datetime(results.get('date'), errors='coerce')
+for c in ['ft_home', 'ft_away', 'ht_home', 'ht_away', 'home_corners', 'away_corners',
+          'home_shots', 'away_shots', 'home_target', 'away_target']:
+    if c in results.columns:
+        results[c] = pd.to_numeric(results[c], errors='coerce')
+results = results.dropna(subset=['date', 'home', 'away', 'ft_home', 'ft_away']).copy()
 
 today = baku_today()   # Bakı vaxtı ilə bu gün (server UTC olsa belə)
 st.session_state.setdefault('d_from', today)
@@ -1384,8 +1334,8 @@ with st.container(border=True):
             date_to = date_col.date_input('Son tarix', key='d_to', label_visibility='collapsed')
             right.button('▶', key='to_next', on_click=_shift_one_date, args=('d_to', 1), use_container_width=True, help='Son tarixini bir gün irəli çək')
     with c3:
-        n_games = st.number_input('Hər komandanın son neçə oyunu?', min_value=1, max_value=50, value=2, step=1, key='n_games')
-    league_options = sorted({str(x) for x in set(fixtures['league'].dropna().unique()) | set(results['league'].dropna().unique()) if str(x).strip()})
+        n_games = st.number_input('Hər komandanın son neçə oyunu?', min_value=1, max_value=50, value=2, step=1)
+    league_options = sorted({str(x) for x in pd.concat([fixtures['league'], results['league']]).dropna() if str(x).strip()})
     # Liqa seçimi: cədvəldə hər liqanın qarşısında quş (checkbox). İlk dəfə hamısı seçilmiş olur.
     known = st.session_state.get('lg_known', set())
     st.session_state.setdefault('lg_sel', set())
@@ -1474,11 +1424,11 @@ with st.container(border=True):
     cols = st.columns(3)
     with cols[0]:
         st.markdown("**⚽ Qol filtrləri**")
-        btts = st.checkbox('BTTS — hər iki komanda qol vurub', key='btts')
-        btts_no = st.checkbox('BTTS yox — ən azı bir komanda qol vurmayıb', key='btts_no')
+        btts = st.checkbox('BTTS — hər iki komanda qol vurub')
+        btts_no = st.checkbox('BTTS yox — ən azı bir komanda qol vurmayıb')
         st.caption("Matç üzrə — hər iki komandanın qollarının cəmi")
         match_goal_25 = st.checkbox('Matç 2.5 üst', key='match_goal_25')
-        under25 = st.checkbox('Matç 2.5 alt', key='under25')
+        under25 = st.checkbox('Matç 2.5 alt')
         match_goal_35 = st.checkbox('Matç 3.5 üst', key='match_goal_35')
         match_goal_45 = st.checkbox('Matç 4.5 üst', key='match_goal_45')
         st.caption("Klub üzrə — hər klubun öz qolları")
@@ -1489,10 +1439,10 @@ with st.container(border=True):
         st.markdown("**⏱️ 1-ci hissə**")
         st.caption("Matç üzrə — ilk hissədəki ümumi qollar")
         match_ht05 = st.checkbox('1-ci hissə 0.5 üst', key='match_ht05')
-        ht05_under = st.checkbox('1-ci hissə 0.5 alt (qol yoxdur)', key='ht05_under')
+        ht05_under = st.checkbox('1-ci hissə 0.5 alt (qol yoxdur)')
         match_ht15 = st.checkbox('1-ci hissə 1.5 üst', key='match_ht15')
-        ht15_under = st.checkbox('1-ci hissə 1.5 alt', key='ht15_under')
-        ht_draw = st.checkbox('1-ci hissə heç-heçə', key='ht_draw')
+        ht15_under = st.checkbox('1-ci hissə 1.5 alt')
+        ht_draw = st.checkbox('1-ci hissə heç-heçə')
         st.caption("Klub üzrə — hər klubun ilk hissə qolları")
         club_ht05 = st.checkbox('Klub 1-ci hissə 0.5 üst', key='club_ht05')
         club_ht15 = st.checkbox('Klub 1-ci hissə 1.5 üst', key='club_ht15')
@@ -1523,25 +1473,6 @@ criteria_selected = any([
     corners_match_on, corners_club_on, shots_match_on, shots_club_on,
     target_match_on, target_club_on
 ])
-def save_filters():
-    try:
-        _persist = {'f_' + k: str(v) for k, v in st.session_state.items()
-                    if isinstance(k, str) and (k in _PKEYS or k.startswith(_PPREF)) and isinstance(v, (bool, int, str)) and v is not False}
-        for _dk in ('d_from', 'd_to'):
-            if _dk in st.session_state:
-                _persist['f_' + _dk] = st.session_state[_dk].isoformat()
-        _persist['f__saved_on'] = baku_today().isoformat()
-        if dict(st.query_params) != _persist:
-            st.query_params.clear()
-            st.query_params.update(_persist)
-        if _persist != st.session_state.get('_last_saved'):
-            FILTERS_FILE.write_text(json.dumps(_persist, ensure_ascii=False), encoding='utf-8')
-            st.session_state['_last_saved'] = _persist
-    except Exception:
-        pass
-
-
-save_filters()
 if not criteria_selected:
     st.info('Ən azı bir filtr seç. Tarixə uyğun oyunlar aşağıda görünür, analiz üçün isə filtr lazımdır.')
 
@@ -1684,230 +1615,199 @@ def backtest_qualified(R, n):
     return (okh & oka).values
 
 
-# ======================= ANALİZ MÜHƏRRİKİ (vektorlaşdırılmış) =======================
-# Hər oyun üçün ayrıca dövr yoxdur: bütün hədəf oyunlar bir dəfəyə yoxlanılır.
-DAY_BASE = 100000   # açar = komanda_kodu * DAY_BASE + gün_nömrəsi
-SHOW_STEP = 30      # bir dəfəyə neçə oyun kartı göstərilsin
-HIST_COLS = ['date', 'time', 'home', 'away', 'ft_home', 'ft_away', 'ht_home', 'ht_away',
-             'home_corners', 'away_corners', 'home_shots', 'away_shots', 'home_target', 'away_target', 'src']
+def _team_ok(hist, team_k):
+    """Komandanın seçilmiş son oyunlarının hamısı filtrə uyğundurmu? Hər oyun komandanın öz baxışından (ev/qonaq) yoxlanılır."""
+    return bool(np.where(hist['home_k'] == team_k, hist['_pass_h'], hist['_pass_a']).all())
 
 
-def _day_int(dates):
-    return pd.to_datetime(dates).values.astype('datetime64[D]').astype('int64')
+# Performans: komanda tarixçələrini bir dəfə qruplaşdırırıq. Əvvəlki versiyada
+# hər qarşıdakı oyun üçün bütün results cədvəli yenidən süzülürdü.
+_TEAM_HISTORY = {}
+for _side in ('home', 'away'):
+    _key_col = f'{_side}_k'
+    for _team_key, _group in results.groupby(_key_col, sort=False):
+        if pd.isna(_team_key):
+            continue
+        _TEAM_HISTORY.setdefault(_team_key, []).append(_group)
+for _team_key, _parts in list(_TEAM_HISTORY.items()):
+    _hist = pd.concat(_parts, ignore_index=False).sort_values('date', kind='stable')
+    _TEAM_HISTORY[_team_key] = _hist
 
 
-def build_history(res, ph, pa):
-    """Keçmiş oyunlardan komanda üzrə sıralı tarixçə qurur: hər komanda-oyun cütü üçün (açar, uyğunluq bayrağı, mövqe)."""
-    n = len(res)
-    teams = np.concatenate([res['home_k'].values, res['away_k'].values])
-    codes, uniques = pd.factorize(teams)
-    days = np.concatenate([_day_int(res['date'])] * 2)
-    flags = np.concatenate([np.asarray(ph, dtype=bool), np.asarray(pa, dtype=bool)]).astype(np.int64)
-    pos = np.concatenate([np.arange(n)] * 2)
-    key = codes.astype(np.int64) * DAY_BASE + days
-    order = np.argsort(key, kind='stable')
-    key, flags, pos = key[order], flags[order], pos[order]
-    return {'key': key, 'cs': np.concatenate([[0], np.cumsum(flags)]), 'pos': pos,
-            'code_of': {t: i for i, t in enumerate(uniques)}}
+def team_last(team_k, date):
+    # Komandanın liqa və kubok daxil olmaqla bütün yarışlardakı əvvəlki oyunları.
+    # Tarix sıralanmış olduğundan searchsorted son N oyunu tez tapır.
+    hist = _TEAM_HISTORY.get(team_k)
+    if hist is None or hist.empty:
+        return None
+    cut = int(hist['date'].searchsorted(date, side='left'))
+    start = cut - int(n_games)
+    if start < 0:
+        return None
+    return hist.iloc[start:cut]
 
+run_clicked = st.button('🔎 Oyunları analiz et', type='primary', key='analyze_button')
 
-def check_side(H, team_arr, day_arr, n):
-    """Hər hədəf oyun üçün: komandanın oyundan əvvəlki n oyunu varmı (enough) və hamısı uyğundurmu (ok)? hi — tarixçədəki son mövqe."""
-    codes = np.fromiter((H['code_of'].get(t, -1) for t in team_arr), dtype=np.int64, count=len(team_arr))
-    hi = np.searchsorted(H['key'], codes * DAY_BASE + day_arr, side='left')
-    lo = np.searchsorted(H['key'], codes * DAY_BASE, side='left')
-    enough = (codes >= 0) & ((hi - lo) >= n)
-    hi_s = np.where(enough, hi, n)
-    ok = enough & ((H['cs'][hi_s] - H['cs'][hi_s - n]) == n)
-    return enough, ok, hi
-
-
-def get_history():
-    """Filtrlər dəyişməyibsə əvvəl qurulmuş tarixçə təkrar istifadə olunur."""
-    key = (tuple(n for n, _ in active_conditions()), len(results), str(results['date'].max()))
-    cached = st.session_state.get('_hist_cache')
-    if cached and cached[0] == key:
-        return cached[1]
-    ph, pa = side_pass_vec(results)
-    H = build_history(results, ph.values, pa.values)
-    st.session_state['_hist_cache'] = (key, H)
-    return H
-
-
-def analyze(n, date_from, date_to, sel_leagues, all_leagues):
-    """Seçilmiş tarix aralığındakı oyunları yoxlayır. Oyun yoxdursa None qaytarır."""
+# Düymə sabit CSS mövqeyində qalır. Drag JS silinib ki, klik hadisəsini bloklamasın.
+auto_run = st.session_state.pop('auto_run', False)   # ◀ ▶ düymələri sonrası analiz avtomatik işləyir
+if run_clicked or (auto_run and criteria_selected):
+    if date_from > date_to:
+        st.error('Başlanğıc tarixi son tarixdən böyük ola bilməz.')
+        st.stop()
+    if not criteria_selected:
+        st.warning('Zəhmət olmasa ən azı bir filtr seç.')
+        st.stop()
+    if conditions_contradict():
+        st.warning('Seçilmiş filtrlər bir-birinə ziddir (məsələn "2.5 üst" və "2.5 alt"), heç bir oyun uyğun gəlməyəcək. Filtrləri dəyiş.')
+        st.stop()
     today = baku_today()
+    results['_pass_h'], results['_pass_a'] = side_pass_vec(results)   # keçmiş oyunların hər biri filtrə uyğundurmu (bir dəfə hesablanır)
     target_cols = ['date', 'time', 'home', 'away', 'league', 'home_k', 'away_k', 'src']
-    fix_t = fixtures[(fixtures['date'].dt.date >= max(date_from, today)) & (fixtures['date'].dt.date <= date_to)].copy()
-    res_t = results[(results['date'].dt.date >= date_from) & (results['date'].dt.date <= date_to) & (results['date'].dt.date < today)].copy()
-    if not all_leagues:
-        fix_t = fix_t[fix_t['league'].isin(sel_leagues)]
-        res_t = res_t[res_t['league'].isin(sel_leagues)]
-    for frame in (fix_t, res_t):
+    fixture_targets = fixtures[
+        (fixtures['date'].dt.date >= date_from) &
+        (fixtures['date'].dt.date <= date_to) &
+        (fixtures['date'].dt.date >= today)
+    ].copy()
+    result_targets = results[
+        (results['date'].dt.date >= date_from) &
+        (results['date'].dt.date <= date_to) &
+        (results['date'].dt.date < today)
+    ].copy()
+    if not sel_leagues:
+        st.warning('Heç bir liqa seçilməyib. "Liqalar" bölməsindən ən azı bir liqa seç.')
+        st.stop()
+    if len(sel_leagues) < len(league_options):
+        fixture_targets = fixture_targets[fixture_targets['league'].isin(sel_leagues)]
+        result_targets = result_targets[result_targets['league'].isin(sel_leagues)]
+    for frame in (fixture_targets, result_targets):
         for col in target_cols:
             if col not in frame.columns:
-                frame[col] = pd.NaT if col == 'date' else ''
-    dg = pd.concat([res_t[target_cols], fix_t[target_cols]], ignore_index=True).dropna(subset=['date', 'home', 'away'])
-    if dg.empty:
-        return None
-    # eyni oyun həm nəticələrdə, həm cədvəldə varsa — bu gün və sonrası üçün cədvəl üstün tutulur
-    dg['_prio'] = (dg['date'].dt.date >= today).astype(int)
-    dg = dg.sort_values('_prio', ascending=False, kind='stable').drop_duplicates(subset=['date', 'home_k', 'away_k']).drop(columns=['_prio']).reset_index(drop=True)
+                frame[col] = '' if col in ('time', 'league') else pd.NaT if col == 'date' else ''
+    day_games = pd.concat([result_targets[target_cols], fixture_targets[target_cols]], ignore_index=True)
+    day_games = day_games.dropna(subset=['date', 'home', 'away']).copy()
+    day_games['_source_priority'] = day_games.apply(lambda r: 1 if r['date'].date() >= today else 0, axis=1)
+    day_games = day_games.sort_values('_source_priority', ascending=False)
+    day_games = day_games.drop_duplicates(subset=['date', 'home_k', 'away_k']).drop(columns=['_source_priority']).copy()
+    if day_games.empty:
+        st.warning('Bu tarix aralığında bazada oyun tapılmadı. Məlumatı yeniləməyi yoxla.')
+        st.stop()
 
-    H = get_history()
-    days = _day_int(dg['date'])
-    en_h, ok_h, hi_h = check_side(H, dg['home_k'].values, days, n)
-    en_a, ok_a, hi_a = check_side(H, dg['away_k'].values, days, n)
-    skipped = int((~(en_h & en_a)).sum())
-    hit = np.flatnonzero(ok_h & ok_a)
-
-    passed = []
-    if len(hit):
-        h_pos = [H['pos'][hi_h[i] - n:hi_h[i]][::-1] for i in hit]   # yeni → köhnə
-        a_pos = [H['pos'][hi_a[i] - n:hi_a[i]][::-1] for i in hit]
-        cols = [c for c in HIST_COLS if c in results.columns]
-        recs = results.iloc[np.concatenate(h_pos + a_pos)][cols].to_dict('records')
-        k = len(hit) * n
-        for j, i in enumerate(hit):
-            g = dg.iloc[i]
+    passed, skipped = [], 0
+    progress = st.progress(0)
+    for i, (_, game) in enumerate(day_games.iterrows()):
+        league, date, home, away = game['league'], game['date'], game['home'], game['away']
+        hhist = team_last(game['home_k'], date)
+        ahist = team_last(game['away_k'], date)
+        if hhist is None or ahist is None:
+            skipped += 1
+            if (i + 1) % 5 == 0 or i + 1 == len(day_games):
+                progress.progress((i + 1) / len(day_games))
+            continue
+        if _team_ok(hhist, game['home_k']) and _team_ok(ahist, game['away_k']):
             passed.append({
-                'Tarix': g['date'].strftime('%Y-%m-%d'),
-                'Saat': str(g.get('time', '')),
-                'Çempionat': g['league'],
-                'Mənbə': src_label(g.get('src', '')),
-                'Ev sahibi': g['home'],
-                'Qonaq': g['away'],
-                'Son oyun sayı': int(n),
-                '_hk': g['home_k'], '_ak': g['away_k'],
-                '_hh': recs[j * n:(j + 1) * n],
-                '_ah': recs[k + j * n:k + (j + 1) * n],
+                'Tarix': date.strftime('%Y-%m-%d'),
+                '_hk': game['home_k'],
+                '_ak': game['away_k'],
+                'Saat': str(game.get('time', '')),
+                'Çempionat': league,
+                'Mənbə': src_label(game.get('src', '')),
+                'Ev sahibi': home,
+                'Qonaq': away,
+                'Son oyun sayı': int(n_games),
+                'Ev sahibinin əvvəlki nəticələri': hhist.sort_values('date', ascending=False).to_dict('records'),
+                'Qonağın əvvəlki nəticələri': ahist.sort_values('date', ascending=False).to_dict('records')
             })
-        # hesab / canlı status
-        lo, hi_ = pd.Timestamp(date_from) - pd.Timedelta(days=1), pd.Timestamp(date_to) + pd.Timedelta(days=1)
-        rr = results.loc[(results['date'] >= lo) & (results['date'] <= hi_), ['home_k', 'away_k', 'date', 'ft_home', 'ft_away']]
+        if (i + 1) % 5 == 0 or i + 1 == len(day_games):
+            progress.progress((i + 1) / len(day_games))
+    progress.empty()
+    if passed:
         res_idx = {}
+        lo, hi = pd.Timestamp(date_from) - pd.Timedelta(days=1), pd.Timestamp(date_to) + pd.Timedelta(days=1)
+        rr = results.loc[(results['date'] >= lo) & (results['date'] <= hi), ['home_k', 'away_k', 'date', 'ft_home', 'ft_away']]
         for hk_, ak_, d_, fh_, fa_ in rr.itertuples(index=False):
             res_idx.setdefault((hk_, ak_), []).append((d_, int(fh_), int(fa_)))
         live_rows = []
         if any(pd.to_datetime(it['Tarix']).date() >= today - timedelta(days=1) for it in passed):
-            try:
-                live_rows = fetch_live_scores()
-            except Exception:
-                live_rows = []
+            with st.spinner('Canlı hesablar yoxlanılır...'):
+                try:
+                    live_rows = fetch_live_scores()
+                except Exception:
+                    live_rows = []
         for it in passed:
             it['Hesab'], it['Status'] = lookup_score(it['_hk'], it['_ak'], pd.to_datetime(it['Tarix']), res_idx, live_rows)
-    return {'passed': passed, 'checked': len(dg), 'skipped': skipped}
-
-
-def hist_cards_html(records):
-    """Komandanın əvvəlki oyunlarının kartları — tək HTML sətri kimi (hər kart üçün ayrıca st.markdown yoxdur)."""
-    import html as _html
-    parts = []
-    for m in records:
-        d = pd.to_datetime(m.get('date'), errors='coerce')
-        date_text = d.strftime('%d.%m.%Y') if pd.notna(d) else 'Tarix məlum deyil'
-        t = str(m.get('time', '')).strip()
-        t = '' if t.lower() in ('nan', 'nat', 'none') else t
-        hg, ag = m.get('ft_home'), m.get('ft_away')
-        score = f'{int(hg)}–{int(ag)}' if pd.notna(hg) and pd.notna(ag) else 'Hesab yoxdur'
-        chips = ''
-        a, b = m.get('ht_home'), m.get('ht_away')
-        if pd.notna(a) and pd.notna(b):
-            chips += f'<span class="chip h">1-ci hissə {int(a)}–{int(b)}</span>'
-        for label, ck, ak in (('Künc', 'home_corners', 'away_corners'), ('Zərbə', 'home_shots', 'away_shots'), ('Qapıya', 'home_target', 'away_target')):
-            a, b = m.get(ck), m.get(ak)
-            if pd.notna(a) and pd.notna(b):
-                chips += f'<span class="chip c">{label} {int(a + b)}</span>'
-        st_ = src_label(m.get('src', ''))
-        if st_:
-            chips += f'<span class="chip s">{st_}</span>'
-        parts.append(
-            f'<div class="mcard"><div class="d">{date_text}{(" · " + t) if t else ""}</div>'
-            f'<div class="t">{_html.escape(str(m.get("home", "")))}</div><div class="s">{score}</div>'
-            f'<div class="t">{_html.escape(str(m.get("away", "")))}</div><div>{chips}</div></div>')
-    return ''.join(parts)
-
-
-def render_analysis(A, cur_key):
-    passed = A['passed']
     st.markdown(
         f'<div class="stats">'
-        f'<div class="stat"><div class="n">{A["checked"]}</div><div class="l">Yoxlanılan oyun</div></div>'
+        f'<div class="stat"><div class="n">{len(day_games)}</div><div class="l">Yoxlanılan oyun</div></div>'
         f'<div class="stat good"><div class="n">{len(passed)}</div><div class="l">Uyğun oyun</div></div>'
-        f'<div class="stat"><div class="n">{A["skipped"]}</div><div class="l">Tarixçəsi çatmayan oyun</div></div>'
-        f'</div>', unsafe_allow_html=True)
-    st.caption('Komandaların əvvəlki oyunları liqa və kubok daxil olmaqla bütün mövcud nəticələrdən, hədəf oyunun tarixindən əvvəl axtarılır. '
-               f'Saatlar Bakı vaxtı ilədir. ⏱ {A.get("secs", 0):.1f} san.')
-    if A.get('key') != cur_key:
-        st.warning('Filtrlər və ya tarix dəyişib — göstərilən nəticə əvvəlki seçimlərə aiddir. Yenisi üçün "Oyunları analiz et" düyməsinə bas.')
-    if not passed:
-        st.info('Seçilən şərtlərə uyğun oyun tapılmadı. Tarix aralığını genişləndir və ya filtrləri dəyiş.')
-        return
-    st.subheader('⚽ Uyğun oyunlar')
-    st.caption('Hər oyunun üzərinə basaraq açın. Komandaların əvvəlki oyunları yan-yana göstərilir.')
-    show_n = st.session_state.get('show_n', SHOW_STEP)
-    for item in passed[:show_n]:
-        time_text = str(item.get('Saat', '')).strip()
-        if time_text.lower() in ('nan', 'nat', 'none', ''):
-            time_text = 'Saat məlum deyil'
-        league_text = str(item.get('Çempionat', '')).replace('_', ' ').replace('-', ' ').strip()
-        title = f"⚽ {item['Tarix']} · {time_text} · {item['Ev sahibi']} — {item['Qonaq']}"
-        live = str(item.get('Status', '')).startswith('Canlı')
-        if item.get('Hesab'):
-            title += f" · {'🔴' if live else '✅'} {item['Hesab']}"
-        with st.expander(title, expanded=False):
+        f'<div class="stat"><div class="n">{skipped}</div><div class="l">Tarixçəsi çatmayan oyun</div></div>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
+    st.caption('Komandaların əvvəlki oyunları liqa və kubok daxil olmaqla bütün mövcud nəticələrdən, hədəf oyunun tarixindən əvvəl axtarılır. Saatlar Bakı vaxtı ilədir.')
+
+    if passed:
+        out = pd.DataFrame(passed)
+        st.subheader('⚽ Uyğun oyunlar')
+        st.caption('Hər oyunun üzərinə basaraq açın. Komandaların əvvəlki oyunları yan-yana göstərilir.')
+        for idx, item in enumerate(passed, start=1):
+            time_text = str(item.get('Saat', '')).strip()
+            if time_text.lower() in ('nan', 'nat', 'none', ''):
+                time_text = 'Saat məlum deyil'
+            league_text = str(item.get('Çempionat', '')).replace('_', ' ').replace('-', ' ').strip()
+            title = f"⚽ {item['Tarix']} · {time_text} · {item['Ev sahibi']} — {item['Qonaq']}"
+            _live = str(item.get('Status', '')).startswith('Canlı')
             if item.get('Hesab'):
-                st.markdown(f"**{'🔴' if live else '✅'} {item['Hesab']}** · {item['Status']}")
-            st.caption(f"{league_text} · Hər komandanın son {item['Son oyun sayı']} oyunu · Mənbə: {item['Mənbə'] or 'məlum deyil'}")
-            left, right = st.columns(2)
-            for col, name, key in ((left, item['Ev sahibi'], '_hh'), (right, item['Qonaq'], '_ah')):
-                with col:
-                    st.markdown(f'<div class="team-head">🏟️ {name}</div>' + hist_cards_html(item[key]), unsafe_allow_html=True)
-    if len(passed) > show_n:
-        if st.button(f'⬇️ Daha çox göstər ({show_n} / {len(passed)})', use_container_width=True, key='show_more'):
-            st.session_state['show_n'] = show_n + SHOW_STEP
-            st.rerun()
-    out = pd.DataFrame([{k: v for k, v in it.items() if not k.startswith('_')} for it in passed])
-    st.download_button('⬇️ Nəticələri CSV kimi yüklə', out.to_csv(index=False).encode('utf-8-sig'),
-                       file_name='futbol_filtri_neticeleri.csv', mime='text/csv')
-
-
-run_clicked = st.button('🔎 Oyunları analiz et', type='primary', key='analyze_button')
-auto_run = st.session_state.pop('auto_run', False)   # ◀ ▶ düymələri və səhifə yenilənməsi sonrası analiz avtomatik işləyir
-cur_key = (tuple(n for n, _ in active_conditions()) if criteria_selected else (), int(n_games), str(date_from), str(date_to),
-           len(sel_leagues), len(results), str(results['date'].max()))
-
-if run_clicked or (auto_run and criteria_selected):
-    problem = None
-    if date_from > date_to:
-        problem = ('error', 'Başlanğıc tarixi son tarixdən böyük ola bilməz.')
-    elif not criteria_selected:
-        problem = ('warning', 'Zəhmət olmasa ən azı bir filtr seç.')
-    elif conditions_contradict():
-        problem = ('warning', 'Seçilmiş filtrlər bir-birinə ziddir (məsələn "2.5 üst" və "2.5 alt"), heç bir oyun uyğun gəlməyəcək. Filtrləri dəyiş.')
-    elif not sel_leagues:
-        problem = ('warning', 'Heç bir liqa seçilməyib. "Liqalar" bölməsindən ən azı bir liqa seç.')
-    if problem:
-        st.session_state.pop('analysis', None)
-        getattr(st, problem[0])(problem[1])
+                title += f" · {'🔴' if _live else '✅'} {item['Hesab']}"
+            with st.expander(title, expanded=False):
+                if item.get('Hesab'):
+                    st.markdown(f"**{'🔴' if _live else '✅'} {item['Hesab']}** · {item['Status']}")
+                st.caption(f"{league_text} · Hər komandanın son {item['Son oyun sayı']} oyunu · Mənbə: {item['Mənbə'] or 'məlum deyil'}")
+                left, right = st.columns(2)
+                for col, team_name, history_key in [
+                    (left, item['Ev sahibi'], 'Ev sahibinin əvvəlki nəticələri'),
+                    (right, item['Qonaq'], 'Qonağın əvvəlki nəticələri')
+                ]:
+                    with col:
+                        st.markdown(f'<div class="team-head">🏟️ {team_name}</div>', unsafe_allow_html=True)
+                        history = item[history_key]
+                        for old_match in history:
+                            old_date = pd.to_datetime(old_match.get('date'), errors='coerce')
+                            date_text = old_date.strftime('%d.%m.%Y') if pd.notna(old_date) else 'Tarix məlum deyil'
+                            old_time = str(old_match.get('time', '')).strip()
+                            if old_time.lower() in ('nan', 'nat', 'none', ''):
+                                old_time = ''
+                            hg, ag = old_match.get('ft_home'), old_match.get('ft_away')
+                            score = f'{int(hg)}–{int(ag)}' if pd.notna(hg) and pd.notna(ag) else 'Hesab yoxdur'
+                            old_home, old_away = str(old_match.get('home', '')), str(old_match.get('away', ''))
+                            chips = ''
+                            hth, hta = old_match.get('ht_home'), old_match.get('ht_away')
+                            if pd.notna(hth) and pd.notna(hta):
+                                chips += f'<span class="chip h">1-ci hissə {int(hth)}–{int(hta)}</span>'
+                            hcn, acn = old_match.get('home_corners'), old_match.get('away_corners')
+                            if pd.notna(hcn) and pd.notna(acn):
+                                chips += f'<span class="chip c">Künc {int(hcn + acn)}</span>'
+                            hsh, ash = old_match.get('home_shots'), old_match.get('away_shots')
+                            hst_, ast_ = old_match.get('home_target'), old_match.get('away_target')
+                            if pd.notna(hsh) and pd.notna(ash):
+                                chips += f'<span class="chip c">Zərbə {int(hsh + ash)}</span>'
+                            if pd.notna(hst_) and pd.notna(ast_):
+                                chips += f'<span class="chip c">Qapıya {int(hst_ + ast_)}</span>'
+                            src_text = src_label(old_match.get('src', ''))
+                            if src_text:
+                                chips += f'<span class="chip s">{src_text}</span>'
+                            st.markdown(
+                                f'<div class="mcard">'
+                                f'<div class="d">{date_text}{(" · " + old_time) if old_time else ""}</div>'
+                                f'<div class="t">{old_home}</div>'
+                                f'<div class="s">{score}</div>'
+                                f'<div class="t">{old_away}</div>'
+                                f'<div>{chips}</div></div>',
+                                unsafe_allow_html=True
+                            )
+        out = out.drop(columns=['Ev sahibinin əvvəlki nəticələri', 'Qonağın əvvəlki nəticələri', '_hk', '_ak'])
+        st.download_button('⬇️ Nəticələri CSV kimi yüklə', out.to_csv(index=False).encode('utf-8-sig'), file_name='futbol_filtri_neticeleri.csv', mime='text/csv')
     else:
-        st.session_state['_ran'] = True
-        save_filters()
-        import time as _t
-        _t0 = _t.perf_counter()
-        with st.spinner('Analiz edilir...'):
-            _A = analyze(int(n_games), date_from, date_to, sel_leagues, len(sel_leagues) >= len(league_options))
-        if _A is None:
-            st.session_state.pop('analysis', None)
-            st.warning('Bu tarix aralığında bazada oyun tapılmadı. Məlumatı yeniləməyi yoxla.')
-        else:
-            _A['key'], _A['secs'] = cur_key, _t.perf_counter() - _t0
-            st.session_state['analysis'] = _A
-            st.session_state['show_n'] = SHOW_STEP
-
-if st.session_state.get('analysis'):
-    render_analysis(st.session_state['analysis'], cur_key)
-
+        st.info('Seçilən şərtlərə uyğun oyun tapılmadı. Tarix aralığını genişləndir və ya filtrləri dəyiş.')
 
 BT_PERIODS = [30, 60, 90, 180, 365, 730]
 
@@ -1925,10 +1825,7 @@ with st.expander('📈 Geriyə test — seçilmiş filtr keçmişdə neçə faiz
     st.caption('Keçmiş oyunlara baxılır: oyundan əvvəl hər iki komandanın son N oyunu seçilmiş filtrlərin hamısına uyğun olubsa, həmin oyunun özü də eyni filtrlərə uyğun gəldimi? '
                'Nəticə filtri dəyişdikcə avtomatik yenilənir. Keçmiş faiz gələcək nəticəyə zəmanət vermir.')
     bt_days = st.select_slider('Ətraflı baxılan dövr', options=BT_PERIODS, value=180, format_func=lambda d: f'son {d} gün', key='bt_days')
-    bt_on = st.toggle('Geriyə testi hesabla (ağırdır, lazım olanda qoş)', key='bt_on', value=False)
-    if not bt_on:
-        st.caption('Filtr seçəndə səhifə tez işləsin deyə geriyə test söndürülüb.')
-    elif not criteria_selected:
+    if not criteria_selected:
         st.info('Yuxarıdan ən azı bir filtr seç, faiz burada avtomatik görünəcək.')
     elif conditions_contradict():
         st.warning('Seçilmiş filtrlər bir-birinə ziddir (məsələn "2.5 üst" və "2.5 alt").')
