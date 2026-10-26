@@ -301,11 +301,6 @@ section[data-testid="stSidebar"] .stButton button { border-radius: 10px; font-we
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
-st.markdown(
-    '<div class="hero"><h1>⚽ Futbol Filtri</h1>'
-    '<p>Hər komandanın son oyunlarını yoxlayır və bütün seçilmiş şərtlərə uyğun gələn matçları tapır.</p></div>',
-    unsafe_allow_html=True
-)
 
 
 def read_csv_safe(path):
@@ -847,22 +842,28 @@ def refresh_data():
 
 def refresh_fd():
     FD_DIR.mkdir(exist_ok=True)
-    sess = requests.Session()
-    sess.headers['User-Agent'] = 'FutbolFiltri/1.0'
     ok, failed = 0, []
-    for season in fd_seasons():
-        for code in FD_LEAGUES:
-            try:
-                r = sess.get(f'{FD_BASE}/mmz4281/{season}/{code}.csv', timeout=30)
-                if r.status_code == 200 and len(r.content) > 200:
-                    (FD_DIR / f'{season}_{code}.csv').write_bytes(r.content)
-                    ok += 1
-                else:
-                    failed.append(f'{season}/{code}')
-            except requests.RequestException:
-                failed.append(f'{season}/{code}')
+    jobs = [(season, code) for season in fd_seasons() for code in FD_LEAGUES]
+
+    def one(job):
+        season, code = job
+        try:
+            r = requests.get(f'{FD_BASE}/mmz4281/{season}/{code}.csv', timeout=15, headers={'User-Agent': 'FutbolFiltri/1.0'})
+            if r.status_code == 200 and len(r.content) > 200:
+                (FD_DIR / f'{season}_{code}.csv').write_bytes(r.content)
+                return f'{season}/{code}', True
+        except requests.RequestException:
+            pass
+        return f'{season}/{code}', False
+
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        for name, good in ex.map(one, jobs):
+            if good:
+                ok += 1
+            else:
+                failed.append(name)
     try:
-        r = sess.get(f'{FD_BASE}/fixtures.csv', timeout=30)
+        r = requests.get(f'{FD_BASE}/fixtures.csv', timeout=15, headers={'User-Agent': 'FutbolFiltri/1.0'})
         if r.status_code == 200 and len(r.content) > 50:
             (FD_DIR / 'fixtures.csv').write_bytes(r.content)
             ok += 1
@@ -1202,58 +1203,64 @@ if not st.session_state.get('_qp_restored'):
         pass
     st.session_state['_qp_restored'] = True
 
-with st.sidebar:
-    st.header('Məlumat bazası')
+with st.container(border=True):
+    st.markdown('**📚 Məlumat bazası**')
     if 'refresh_msgs' in st.session_state:
         for kind, text in st.session_state.pop('refresh_msgs'):
             getattr(st, kind)(text)
     if st.button('🔄 Məlumatı yenilə', use_container_width=True):
+        def _j_om():
+            refresh_data()
+            return [('success', 'Open Matchday yeniləndi.')]
+
+        def _j_fd():
+            ok, failed = refresh_fd()
+            m = [('success', f'football-data.co.uk: {ok} fayl yükləndi.')]
+            if failed:
+                m.append(('warning', f'Yüklənməyən fayllar ({len(failed)}): ' + ', '.join(failed[:15])))
+            return m
+
+        def _j_fdx():
+            ok, failed = refresh_fdx()
+            m = [('success', f'football-data.co.uk (əlavə liqalar): {ok} fayl yükləndi.')]
+            if failed:
+                m.append(('warning', 'Yüklənməyən əlavə liqalar: ' + ', '.join(failed)))
+            return m
+
+        def _j_ir():
+            refresh_ir()
+            return [('success', 'international_results (milli komandalar) yeniləndi.')]
+
+        def _j_of():
+            ok, bad = refresh_of()
+            return [('success', f'openfootball: {ok} fayl yükləndi.' + (f' Xətalı: {bad}.' if bad else ''))]
+
+        def _j_es():
+            n_res, n_fix, espn_failed, st_done, st_left = refresh_espn()
+            m = [('success', f'ESPN: {n_res} nəticə, {n_fix} qarşıdakı oyun. Künc/kart statistikası: {st_done} oyun yükləndi'
+                  + (f', {st_left} oyun növbəti yeniləmədə davam edəcək.' if st_left > 0 else '.'))]
+            if espn_failed:
+                m.append(('warning', f'ESPN-də yüklənməyən yarışlar ({len(espn_failed)}): ' + ', '.join(espn_failed)))
+            return m
+
+        _jobs = [('Open Matchday', _j_om), ('football-data.co.uk', _j_fd), ('football-data.co.uk (əlavə liqalar)', _j_fdx),
+                 ('international_results', _j_ir), ('openfootball', _j_of), ('ESPN', _j_es)]
         msgs = []
-        with st.spinner('Məlumatlar yüklənir...'):
-            try:
-                refresh_data()
-                msgs.append(('success', 'Open Matchday yeniləndi.'))
-            except Exception as e:
-                msgs.append(('error', f'Open Matchday yenilənmədi: {e}'))
-            try:
-                ok, failed = refresh_fd()
-                msgs.append(('success', f'football-data.co.uk: {ok} fayl yükləndi.'))
-                if failed:
-                    msgs.append(('warning', f'Yüklənməyən fayllar ({len(failed)}): ' + ', '.join(failed[:15])))
-            except Exception as e:
-                msgs.append(('error', f'football-data.co.uk yenilənmədi: {e}'))
-            try:
-                ok, failed = refresh_fdx()
-                msgs.append(('success', f'football-data.co.uk (əlavə liqalar): {ok} fayl yükləndi.'))
-                if failed:
-                    msgs.append(('warning', 'Yüklənməyən əlavə liqalar: ' + ', '.join(failed)))
-            except Exception as e:
-                msgs.append(('error', f'football-data.co.uk əlavə liqalar yenilənmədi: {e}'))
-            try:
-                refresh_ir()
-                msgs.append(('success', 'international_results (milli komandalar) yeniləndi.'))
-            except Exception as e:
-                msgs.append(('error', f'international_results yenilənmədi: {e}'))
-            try:
-                ok, bad = refresh_of()
-                msgs.append(('success', f'openfootball: {ok} fayl yükləndi.' + (f' Xətalı: {bad}.' if bad else '')))
-            except Exception as e:
-                msgs.append(('error', f'openfootball yenilənmədi: {e}'))
-            try:
-                n_res, n_fix, espn_failed, st_done, st_left = refresh_espn()
-                msgs.append(('success', f'ESPN: {n_res} nəticə, {n_fix} qarşıdakı oyun. Künc/kart statistikası: {st_done} oyun yükləndi'
-                             + (f', {st_left} oyun növbəti yeniləmədə davam edəcək.' if st_left > 0 else '.')))
-                if espn_failed:
-                    msgs.append(('warning', f'ESPN-də yüklənməyən yarışlar ({len(espn_failed)}): ' + ', '.join(espn_failed)))
-            except Exception as e:
-                msgs.append(('error', f'ESPN yenilənmədi: {e}'))
+        with st.spinner('Məlumatlar yüklənir (mənbələr eyni anda yüklənir)...'):
+            with ThreadPoolExecutor(max_workers=len(_jobs)) as _ex:
+                _futs = [(nm, _ex.submit(fn)) for nm, fn in _jobs]
+                for nm, fu in _futs:
+                    try:
+                        msgs.extend(fu.result())
+                    except Exception as e:
+                        msgs.append(('error', f'{nm} yenilənmədi: {e}'))
         st.session_state['refresh_msgs'] = msgs
         st.rerun()
     st.caption('Yeniləmə internet tələb edir. Əvvəl yüklənmiş məlumatlar internet olmadan da analiz edilə bilər.')
 
 fixtures, results, fd_only_teams = load_data()
 if fixtures.empty:
-    st.error('Oyun cədvəlləri tapılmadı. ZIP-i tam çıxartdığını yoxla və ya sol paneldən yenilə.')
+    st.error('Oyun cədvəlləri tapılmadı. ZIP-i tam çıxartdığını yoxla və ya yuxarıdakı "Məlumatı yenilə" düyməsindən yenilə.')
     st.stop()
 
 today = baku_today()   # Bakı vaxtı ilə bu gün (server UTC olsa belə)
@@ -1956,11 +1963,11 @@ with st.expander('Məlumat bazası haqqında'):
         if FD_DIR.exists() and any(FD_DIR.glob('*.csv')):
             st.write(f'football-data.co.uk faylları: {len(list(FD_DIR.glob("*.csv")))}.')
         else:
-            st.write('football-data.co.uk hələ yüklənməyib — sol paneldən "Məlumatı yenilə" düyməsinə bas.')
+            st.write('football-data.co.uk hələ yüklənməyib — yuxarıdakı "Məlumatı yenilə" düyməsinə bas.')
         if (ESPN_DIR / 'results.csv').exists():
             st.write('ESPN fayllarından oxunan nəticə sayı: ' + str(len(read_csv_safe(ESPN_DIR / 'results.csv'))) + '.')
         else:
-            st.write('ESPN hələ yüklənməyib — sol paneldən "Məlumatı yenilə" düyməsinə bas.')
+            st.write('ESPN hələ yüklənməyib — yuxarıdakı "Məlumatı yenilə" düyməsinə bas.')
         if fd_only_teams:
             st.write(f'Yalnız football-data.co.uk-də tapılan komandalar: {len(fd_only_teams)}. Əgər bunların arasında Open Matchday-də başqa cür yazılan komanda varsa, app.py-dakı ALIASES siyahısına əlavə et.')
             st.code('\n'.join(fd_only_teams))
