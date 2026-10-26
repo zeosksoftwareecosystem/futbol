@@ -66,19 +66,17 @@ ESPN_LEAGUES = {
     # Avropa liqaları (football-data.co.uk əsas siyahısında olmayanlar)
     'aut.1': 'Austria Bundesliga', 'den.1': 'Denmark Superliga', 'swe.1': 'Sweden Allsvenskan',
     'nor.1': 'Norway Eliteserien', 'sui.1': 'Switzerland Super League', 'rus.1': 'Russia Premier League',
-    'ukr.1': 'Ukraine Premier League', 'pol.1': 'Poland Ekstraklasa', 'cze.1': 'Czech First League',
-    'cro.1': 'Croatia HNL', 'srb.1': 'Serbia SuperLiga', 'rou.1': 'Romania Liga I',
-    'irl.1': 'Ireland Premier Division', 'fin.1': 'Finland Veikkausliiga', 'aze.1': 'Azerbaijan Premier League',
-    'isr.1': 'Israel Premier League',
+    'cze.1': 'Czech First League',
+    'rou.1': 'Romania Liga I',
+    'irl.1': 'Ireland Premier Division', 'fin.1': 'Finland Veikkausliiga',     'isr.1': 'Israel Premier League',
     # Amerika
     'usa.1': 'USA MLS', 'mex.1': 'Mexico Liga MX', 'bra.1': 'Brazil Serie A', 'bra.2': 'Brazil Serie B',
     'arg.1': 'Argentina Primera Division', 'col.1': 'Colombia Primera A', 'chi.1': 'Chile Primera Division',
     'uru.1': 'Uruguay Primera Division', 'ecu.1': 'Ecuador Serie A', 'per.1': 'Peru Liga 1', 'par.1': 'Paraguay Primera Division',
     # Asiya, Okeaniya, Afrika
-    'jpn.1': 'Japan J1 League', 'kor.1': 'South Korea K League 1', 'chn.1': 'China Super League',
+    'jpn.1': 'Japan J1 League', 'chn.1': 'China Super League',
     'aus.1': 'Australia A-League', 'ind.1': 'India Super League', 'ksa.1': 'Saudi Pro League',
-    'uae.1': 'UAE Pro League', 'qat.1': 'Qatar Stars League', 'egy.1': 'Egypt Premier League',
-    'rsa.1': 'South Africa Premiership',
+        'rsa.1': 'South Africa Premiership',
     # Milli komandalar
     'fifa.friendly': 'International Friendly', 'uefa.nations': 'UEFA Nations League',
     'uefa.euroq': 'UEFA Euro Qualifying', 'concacaf.nations.league': 'CONCACAF Nations League',
@@ -1739,6 +1737,41 @@ def analyze(n, date_from, date_to, sel_leagues, all_leagues):
         live_rows = []   # canlı hesab söndürülüb (yavaşladırdı); hesab yalnız nəticələr bazasından götürülür
         for it in passed:
             it['Hesab'], it['Status'] = lookup_score(it['_hk'], it['_ak'], pd.to_datetime(it['Tarix']), res_idx, live_rows)
+        # Başlıqda göstəriləcək statistika: seçilmiş filtrə uyğun (künc / zərbə / qapıya zərbə / hesab + 1-ci hissə)
+        _fn = ' | '.join(n_ for n_, _ in active_conditions())
+        want_corners = 'künc' in _fn
+        want_target = 'dəqiq zərbə' in _fn
+        want_shots = 'zərbə' in _fn.replace('dəqiq zərbə', '')
+        want_score = any(not any(x in n_ for x in ('künc', 'zərbə')) for n_, _ in active_conditions())   # qol/BTTS/1-ci hissə filtri varsa hesab da göstərilir
+        _scols = [c for c in ('ht_home', 'ht_away', 'home_corners', 'away_corners', 'home_shots', 'away_shots', 'home_target', 'away_target') if c in results.columns]
+        sr = results.loc[(results['date'] >= lo) & (results['date'] <= hi_), ['home_k', 'away_k', 'date', 'ft_home', 'ft_away'] + _scols]
+        stat_idx = {}
+        for row in sr.to_dict('records'):
+            stat_idx.setdefault((row['home_k'], row['away_k']), []).append(row)
+
+        def _pair(r, a, b):
+            x, y = r.get(a), r.get(b)
+            if x is None or y is None or pd.isna(x) or pd.isna(y):
+                return None
+            return int(x), int(y)
+
+        for it in passed:
+            d0 = pd.to_datetime(it['Tarix'])
+            r = next((r_ for r_ in stat_idx.get((it['_hk'], it['_ak']), []) if abs((r_['date'] - d0).days) <= 1), None)
+            parts = []
+            if r is not None:
+                if want_corners and (c := _pair(r, 'home_corners', 'away_corners')):
+                    parts.append(f'Künc {c[0]}–{c[1]} ({c[0] + c[1]})')
+                if want_shots and (c := _pair(r, 'home_shots', 'away_shots')):
+                    parts.append(f'Zərbə {c[0]}–{c[1]} ({c[0] + c[1]})')
+                if want_target and (c := _pair(r, 'home_target', 'away_target')):
+                    parts.append(f'Qapıya {c[0]}–{c[1]} ({c[0] + c[1]})')
+                if want_score or not parts:
+                    ft = _pair(r, 'ft_home', 'ft_away')
+                    ht = _pair(r, 'ht_home', 'ht_away')
+                    if ft:
+                        parts.append(f'{ft[0]}–{ft[1]}' + (f' (1-ci hissə {ht[0]}–{ht[1]})' if ht else ''))
+            it['Statistika'] = ' · '.join(parts)
     return {'passed': passed, 'checked': len(dg), 'skipped': skipped,
             'filters': [n_ for n_, _ in active_conditions()], 'n_games': int(n),
             'date_from': str(date_from), 'date_to': str(date_to),
@@ -1803,7 +1836,9 @@ def render_analysis(A, cur_key):
         _date_txt = f":red[{item['Tarix']}]" if _is_past else item['Tarix']
         title = f"⚽ {_date_txt} · {time_text} · {item['Ev sahibi']} — {item['Qonaq']}"
         live = str(item.get('Status', '')).startswith('Canlı')
-        if item.get('Hesab'):
+        if item.get('Statistika'):
+            title += f" · {'🔴' if live else '✅'} {item['Statistika']}"
+        elif item.get('Hesab'):
             title += f" · {'🔴' if live else '✅'} {item['Hesab']}"
         with st.expander(title, expanded=False):
             if item.get('Hesab'):
