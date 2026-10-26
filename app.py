@@ -1,5 +1,5 @@
 from pathlib import Path
-import zipfile, io, re, difflib, unicodedata, requests, shutil, tempfile, json
+import functools, zipfile, io, re, difflib, unicodedata, requests, shutil, tempfile, json
 from datetime import datetime, timezone
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -156,6 +156,7 @@ _TRANSLIT = str.maketrans({'ø': 'o', 'Ø': 'O', 'æ': 'ae', 'Æ': 'AE', 'œ': '
                            'ð': 'd', 'Ð': 'D', 'þ': 'th', 'Þ': 'TH', 'ł': 'l', 'Ł': 'L', 'ı': 'i', 'İ': 'I'})
 
 
+@functools.lru_cache(maxsize=None)
 def team_key(name):
     s = unicodedata.normalize('NFKD', str(name).translate(_TRANSLIT)).encode('ascii', 'ignore').decode().lower()
     s = s.replace('&', ' and ')
@@ -513,14 +514,21 @@ def _split_ambiguous(df, col, league_norm):
     return df
 
 
+def _map_keys(series):
+    """team_key-i hər sətir üçün yox, yalnız unikal adlar üçün çağırır (dəfələrlə sürətlidir)."""
+    codes, uniq = pd.factorize(series)
+    keys = np.array([team_key(x) for x in uniq] + [team_key(float('nan'))], dtype=object)   # -1 (boş ad) sonuncu elementə düşür
+    return pd.Series(keys[codes], index=series.index)
+
+
 def add_keys(df, src):
     if df.empty:
         return df
     df = df.copy()
     df['src'] = src
     df['date'] = pd.to_datetime(df.get('date'), errors='coerce').dt.normalize()
-    df['home_k'] = df['home'].map(team_key)
-    df['away_k'] = df['away'].map(team_key)
+    df['home_k'] = _map_keys(df['home'])
+    df['away_k'] = _map_keys(df['away'])
     if 'league' in df.columns:
         league_norm = df['league'].fillna('').astype(str).str.lower()
         df = _split_ambiguous(df, 'home_k', league_norm)
@@ -538,6 +546,7 @@ def _tokens_match(short, long_):
     return True
 
 
+@functools.lru_cache(maxsize=500000)
 def names_compatible(a, b):
     """'cheltenham' ~ 'cheltenham town', 'man city' ~ 'manchester city' kimi adları uyğun sayır."""
     if a == b:
@@ -760,8 +769,10 @@ def dedupe_games(df, has_score):
     return df.groupby(['date', 'home_k', 'away_k'], as_index=False, sort=False).agg(agg)
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner='⏳ Məlumat bazası hazırlanır (yenidən başladıqdan sonra ilk açılışda bir az çəkə bilər)...')
 def load_data():
+    import time as _tm
+    _t0 = _tm.perf_counter()
     fixtures, results = [], []
     for f in DATA_DIR.glob('*/*.csv'):
         try:
@@ -816,6 +827,7 @@ def load_data():
             if c in res.columns:
                 res[c] = pd.to_numeric(res[c], errors='coerce')
         res = res.dropna(subset=['date', 'home', 'away', 'ft_home', 'ft_away']).reset_index(drop=True)
+    print(f'load_data hazır: {_tm.perf_counter() - _t0:.1f} san, nəticə={len(res)}, cədvəl={len(fix)}', flush=True)
     return fix, res, sorted(set(fix_only) | set(res_only))
 
 
