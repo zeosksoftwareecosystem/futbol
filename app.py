@@ -39,9 +39,6 @@ FD_KEEP = ['date', 'time', 'home', 'away', 'league', 'ft_home', 'ft_away', 'ht_h
 # ---- ESPN (üçüncü mənbə: qitə kubokları və Open Matchday-də olmayan yarışlar) ----
 # API açarı lazım deyil. Rəsmi olmayan ictimai endpointdir, gələcəkdə dəyişə bilər.
 ESPN_DIR = ROOT / 'espn-data'
-# SofaScore — qeyri-rəsmi, sınaq məqsədli əlavə mənbə; əsas mənbələrdən asılı deyil.
-SOFASCORE_DIR = ROOT / 'sofascore-data'
-SOFASCORE_BASE = 'https://www.sofascore.com/api/v1/sport/football/scheduled-events'
 ESPN_BASE = 'https://site.api.espn.com/apis/site/v2/sports/soccer'
 # Açar: ESPN liqa kodu (slug). Dəyər: ESPN cavabında ad gəlməzsə istifadə olunan ad.
 # Yeni yarış əlavə etmək üçün espn.com-da liqanın səhifəsinin URL-indəki kodu bura yaz.
@@ -306,8 +303,7 @@ section[data-testid="stSidebar"] .stButton button { border-radius: 10px; font-we
 st.markdown(CSS, unsafe_allow_html=True)
 st.markdown(
     '<div class="hero"><h1>⚽ Futbol Filtri</h1>'
-    '<p>Hər komandanın son oyunlarını yoxlayır və bütün seçilmiş şərtlərə uyğun gələn matçları tapır.</p>'
-    '<div class="tags"><span>Open Matchday</span><span>football-data.co.uk</span><span>ESPN</span><span>openfootball</span><span>API açarı lazım deyil</span></div></div>',
+    '<p>Hər komandanın son oyunlarını yoxlayır və bütün seçilmiş şərtlərə uyğun gələn matçları tapır.</p></div>',
     unsafe_allow_html=True
 )
 
@@ -495,7 +491,7 @@ def of_seasons():
     return [f'{y - k}-{(y - k + 1) % 100:02d}' for k in range(2)]
 
 
-SRC_LABELS = {'FD': 'football-data.co.uk', 'OM': 'Open Matchday', 'ES': 'ESPN', 'OF': 'openfootball', 'IR': 'international_results', 'SS': 'SofaScore (sınaq)'}
+SRC_LABELS = {'FD': 'football-data.co.uk', 'OM': 'Open Matchday', 'ES': 'ESPN', 'OF': 'openfootball', 'IR': 'international_results'}
 
 
 def src_label(code):
@@ -685,79 +681,6 @@ def load_espn():
     return out[0], out[1]
 
 
-def load_sofascore():
-    """Diskdə saxlanmış SofaScore sınaq məlumatını oxuyur; şəbəkəyə özü qoşulmur."""
-    out = []
-    for name in ('fixtures', 'results'):
-        path = SOFASCORE_DIR / f'{name}.csv'
-        if not path.exists():
-            out.append(pd.DataFrame())
-            continue
-        df = read_csv_safe(path)
-        if df.empty or not {'date', 'home', 'away'} <= set(df.columns):
-            out.append(pd.DataFrame())
-            continue
-        df = to_baku(df, 'UTC')
-        out.append(df)
-    return out[0], out[1]
-
-
-def _sofa_day(day):
-    headers = {'User-Agent': 'Mozilla/5.0 (compatible; FootballFilter/1.0)', 'Accept': 'application/json'}
-    resp = requests.get(f'{SOFASCORE_BASE}/{day.isoformat()}', headers=headers, timeout=8)
-    resp.raise_for_status()
-    return resp.json().get('events', [])
-
-
-def refresh_sofascore():
-    """SofaScore (qeyri-rəsmi) — son 14 gün və növbəti 21 gün, paralel sorğularla. Əlçatan deyilsə (403 və s.) xəta qaldırır, digər mənbələrə toxunmur."""
-    SOFASCORE_DIR.mkdir(parents=True, exist_ok=True)
-    today_ = baku_today()
-    days = [today_ + timedelta(days=o) for o in range(-14, 22)]
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        futs = [ex.submit(_sofa_day, d) for d in days]
-        got, last_err = [], None
-        for f in futs:
-            try:
-                got.append(f.result())
-            except Exception as e:
-                last_err = e
-                got.append(None)
-    if all(g is None for g in got):
-        raise RuntimeError(f'heç bir gün yüklənmədi ({last_err})')
-    fixtures, results = [], []
-    for events in got:
-        for ev in events or []:
-            try:
-                home = (ev.get('homeTeam') or {}).get('name')
-                away = (ev.get('awayTeam') or {}).get('name')
-                ts = ev.get('startTimestamp')
-                if not home or not away or not ts:
-                    continue
-                dt = pd.to_datetime(int(ts), unit='s', utc=True)
-                t = ev.get('tournament') or {}
-                league = t.get('name') or (t.get('uniqueTournament') or {}).get('name') or 'SofaScore'
-                status = (ev.get('status') or {}).get('type', '')
-                # date və time ayrı yazılır (UTC) — to_baku bunları Bakı vaxtına çevirir
-                row = {'date': dt.strftime('%Y-%m-%d'), 'time': dt.strftime('%H:%M'), 'home': home, 'away': away, 'league': league}
-                hs, aw = ev.get('homeScore') or {}, ev.get('awayScore') or {}
-                if status == 'finished' and hs.get('current') is not None and aw.get('current') is not None:
-                    row.update({'ft_home': hs.get('current'), 'ft_away': aw.get('current'),
-                                'ht_home': hs.get('period1'), 'ht_away': aw.get('period1')})
-                    results.append(row)
-                elif status == 'notstarted':   # oynanmayan/ləğv/təxirə salınmış oyunlar qarşıdakı sayılmasın
-                    fixtures.append(row)
-            except Exception:
-                continue
-    for name, rows in (('fixtures', fixtures), ('results', results)):
-        df = pd.DataFrame(rows)
-        if not df.empty:
-            df = df.drop_duplicates(subset=['date', 'home', 'away']).sort_values('date')
-        df.to_csv(SOFASCORE_DIR / f'{name}.csv', index=False)
-    load_data.clear()
-    return len(results), len(fixtures)
-
-
 def combine_sources(primary, secondary):
     """Eyni oyun (tarix + komanda açarı) iki cədvəldə varsa birləşdirir; boş xanaları ikinci cədvəl doldurur."""
     if secondary.empty:
@@ -802,7 +725,7 @@ def _similar_names(a, b, same_day=True):
 
 
 def dedupe_games(df, has_score):
-    """Eyni oyun fərqli ad yazılışları ilə təkrar qalıbsa birləşdirir (OM / openfootball / ESPN / SofaScore arasında).
+    """Eyni oyun fərqli ad yazılışları ilə təkrar qalıbsa birləşdirir (OM / openfootball / ESPN arasında).
     Şərt: tarix fərqi <= 1 gün, bir komanda eyni, digərinin adı oxşar (nəticələrdə hesab da eyni). Sürətlidir: yalnız eyni komanda+tarix cütləri müqayisə olunur."""
     if df.empty or not {'date', 'home_k', 'away_k'} <= set(df.columns):
         return df
@@ -843,7 +766,7 @@ def dedupe_games(df, has_score):
 
 
 @st.cache_resource(show_spinner=False)
-def load_data(use_ss=False):
+def load_data():
     fixtures, results = [], []
     for f in DATA_DIR.glob('*/*.csv'):
         try:
@@ -864,9 +787,6 @@ def load_data(use_ss=False):
     es_fix, es_res = load_espn()
     om_fix = combine_sources(om_fix, add_keys(es_fix, 'ES'))
     om_res = combine_sources(om_res, add_keys(es_res, 'ES'))
-    ss_fix, ss_res = load_sofascore() if use_ss else (pd.DataFrame(), pd.DataFrame())
-    om_fix = combine_sources(om_fix, add_keys(ss_fix, 'SS'))
-    om_res = combine_sources(om_res, add_keys(ss_res, 'SS'))
     fd_fix, fd_res = load_fd()
     fd_fix, fd_res = add_keys(fd_fix, 'FD'), add_keys(fd_res, 'FD')
     fdx_res = add_keys(load_fdx(), 'FD')
@@ -1260,7 +1180,7 @@ def lookup_score(hk, ak, date, res_idx, live_rows):
 
 # ---- Filtrlərin URL-də saxlanması: səhifə yenilənəndə (başqa appdan qayıdanda) quşlar itməsin ----
 FILTERS_FILE = ROOT / 'saved_filters.json'
-_PKEYS = {'_ran', 'btts', 'btts_no', 'under25', 'ht05_under', 'ht15_under', 'ht_draw', 'n_games', 'use_ss'}
+_PKEYS = {'_ran', 'btts', 'btts_no', 'under25', 'ht05_under', 'ht15_under', 'ht_draw', 'n_games'}
 _PPREF = ('match_', 'club_', 'min_', 'on_', 'mode_', 'corners_', 'shots_', 'target_')
 if not st.session_state.get('_qp_restored'):
     try:
@@ -1327,17 +1247,11 @@ with st.sidebar:
                     msgs.append(('warning', f'ESPN-də yüklənməyən yarışlar ({len(espn_failed)}): ' + ', '.join(espn_failed)))
             except Exception as e:
                 msgs.append(('error', f'ESPN yenilənmədi: {e}'))
-            try:
-                ss_res_n, ss_fix_n = refresh_sofascore()
-                msgs.append(('success', f'SofaScore sınaq mənbəyi: {ss_res_n} nəticə, {ss_fix_n} qarşıdakı oyun yükləndi.'))
-            except Exception as e:
-                msgs.append(('warning', f'SofaScore sınaq mənbəyi əlçatan olmadı: {e}. Digər mənbələr işləməyə davam edir.'))
         st.session_state['refresh_msgs'] = msgs
         st.rerun()
-    use_ss = st.checkbox('SofaScore sınaq mənbəyini istifadə et (analizi yavaşladır)', value=False, key='use_ss')
     st.caption('Yeniləmə internet tələb edir. Əvvəl yüklənmiş məlumatlar internet olmadan da analiz edilə bilər.')
 
-fixtures, results, fd_only_teams = load_data(use_ss)
+fixtures, results, fd_only_teams = load_data()
 if fixtures.empty:
     st.error('Oyun cədvəlləri tapılmadı. ZIP-i tam çıxartdığını yoxla və ya sol paneldən yenilə.')
     st.stop()
@@ -1866,7 +1780,9 @@ def render_analysis(A, cur_key):
         if time_text.lower() in ('nan', 'nat', 'none', ''):
             time_text = 'Saat məlum deyil'
         league_text = str(item.get('Çempionat', '')).replace('_', ' ').replace('-', ' ').strip()
-        title = f"⚽ {item['Tarix']} · {time_text} · {item['Ev sahibi']} — {item['Qonaq']}"
+        _is_past = pd.to_datetime(item['Tarix']).date() < baku_today()   # keçmiş tarixdə tapılan oyunun tarixi qırmızı
+        _date_txt = f":red[{item['Tarix']}]" if _is_past else item['Tarix']
+        title = f"⚽ {_date_txt} · {time_text} · {item['Ev sahibi']} — {item['Qonaq']}"
         live = str(item.get('Status', '')).startswith('Canlı')
         if item.get('Hesab'):
             title += f" · {'🔴' if live else '✅'} {item['Hesab']}"
@@ -1887,8 +1803,28 @@ def render_analysis(A, cur_key):
     out['Hər komandanın yoxlanan son oyunu'] = A.get('n_games', '')
     out['Analiz tarix aralığı'] = f"{A.get('date_from', '')} → {A.get('date_to', '')}"
     out['Liqa seçimi'] = A.get('leagues', '')
-    st.download_button('⬇️ Nəticələri CSV kimi yüklə', out.to_csv(index=False).encode('utf-8-sig'),
-                       file_name='futbol_filtri_neticeleri.csv', mime='text/csv')
+    try:
+        import io as _io
+        _buf = _io.BytesIO()
+        with pd.ExcelWriter(_buf, engine='openpyxl') as _xw:
+            out.to_excel(_xw, index=False, sheet_name='Nəticələr')
+            _ws = _xw.sheets['Nəticələr']
+            from openpyxl.styles import Font, PatternFill, Alignment
+            for _c in _ws[1]:
+                _c.font = Font(bold=True, color='FFFFFF')
+                _c.fill = PatternFill('solid', fgColor='15803D')
+                _c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            for _col in _ws.columns:
+                _w = max(len(str(_c.value)) if _c.value is not None else 0 for _c in _col)
+                _ws.column_dimensions[_col[0].column_letter].width = min(max(_w + 3, 10), 45)
+            _ws.freeze_panes = 'A2'
+            _ws.auto_filter.ref = _ws.dimensions
+        st.download_button('⬇️ Nəticələri Excel kimi yüklə', _buf.getvalue(),
+                           file_name='futbol_filtri_neticeleri.xlsx',
+                           mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except ImportError:   # openpyxl yoxdursa: Excel-in Azərbaycan tənzimləməsində düzgün açılan CSV (ayırıcı ;)
+        st.download_button('⬇️ Nəticələri CSV kimi yüklə', out.to_csv(index=False, sep=';').encode('utf-8-sig'),
+                           file_name='futbol_filtri_neticeleri.csv', mime='text/csv')
 
 
 run_clicked = st.button('🔎 Oyunları analiz et', type='primary', key='analyze_button')
@@ -2010,17 +1946,21 @@ with st.expander('📈 Geriyə test — seçilmiş filtr keçmişdə neçə faiz
             st.error(f'Geriyə test hesablanmadı: {e}')
 
 with st.expander('Məlumat bazası haqqında'):
-    st.write(f'Çempionat qovluqları: {len(list(DATA_DIR.iterdir())) if DATA_DIR.exists() else 0}. Qarşıdakı oyun sətri: {len(fixtures)}. Tarixi nəticə sətri: {len(results)}. Siyahıdakı liqa sayı: {len(league_options)}.')
-    st.write('Mənbələr: Open Matchday — https://github.com/oladeeayo/open-matchday, football-data.co.uk (əsas və əlavə liqalar), openfootball (https://github.com/openfootball/football.json), international_results (https://github.com/martj42/international_results, milli komandalar) ESPN (qitə kubokları, daxili kuboklar və onlarla liqa) və SofaScore (qeyri-rəsmi sınaq mənbəyi; əsas mənbə deyil). SofaScore-dan hazırda oyun təqvimi və yekun hesab/yarımvaxt hesabı götürülür; künc və kart statistikası zəmanətli deyil. Eyni oyun bir neçə mənbədə varsa statistika üçün əvvəlcə football-data.co.uk, sonra Open Matchday, sonra openfootball, sonra ESPN götürülür. Künc, zərbə və qapıya dəqiq zərbə statistikası football-data.co.uk əsas liqalarında, Open Matchday-də və ESPN-in yüklədiyi oyunlarda var. Statistikası olmayan oyunlar müvafiq statistik filtrdə uyğun sayılmır.')
-    st.write(f'Əlavə liqa faylları (football-data.co.uk/new): {len(list(FDX_DIR.glob("*.csv"))) if FDX_DIR.exists() else 0}. openfootball faylları: {len(list(OF_DIR.glob("*.json"))) if OF_DIR.exists() else 0}.')
-    if FD_DIR.exists() and any(FD_DIR.glob('*.csv')):
-        st.write(f'football-data.co.uk faylları: {len(list(FD_DIR.glob("*.csv")))}.')
+    show_info = st.checkbox('Ətraflı məlumatı göstər (yavaş ola bilər)', key='show_info', value=False)
+    if not show_info:
+        st.caption('Ətraflı məlumat üçün yuxarıdakı qutunu işarələ.')
     else:
-        st.write('football-data.co.uk hələ yüklənməyib — sol paneldən "Məlumatı yenilə" düyməsinə bas.')
-    if (ESPN_DIR / 'results.csv').exists():
-        st.write('ESPN fayllarından oxunan nəticə sayı: ' + str(len(read_csv_safe(ESPN_DIR / 'results.csv'))) + '.')
-    else:
-        st.write('ESPN hələ yüklənməyib — sol paneldən "Məlumatı yenilə" düyməsinə bas.')
-    if fd_only_teams:
-        st.write(f'Yalnız football-data.co.uk-də tapılan komandalar: {len(fd_only_teams)}. Əgər bunların arasında Open Matchday-də başqa cür yazılan komanda varsa, app.py-dakı ALIASES siyahısına əlavə et.')
-        st.code('\n'.join(fd_only_teams))
+        st.write(f'Çempionat qovluqları: {len(list(DATA_DIR.iterdir())) if DATA_DIR.exists() else 0}. Qarşıdakı oyun sətri: {len(fixtures)}. Tarixi nəticə sətri: {len(results)}. Siyahıdakı liqa sayı: {len(league_options)}.')
+        st.write('Mənbələr: Open Matchday — https://github.com/oladeeayo/open-matchday, football-data.co.uk (əsas və əlavə liqalar), openfootball (https://github.com/openfootball/football.json), international_results (https://github.com/martj42/international_results, milli komandalar) ESPN (qitə kubokları, daxili kuboklar və onlarla liqa) Eyni oyun bir neçə mənbədə varsa statistika üçün əvvəlcə football-data.co.uk, sonra Open Matchday, sonra openfootball, sonra ESPN götürülür. Künc, zərbə və qapıya dəqiq zərbə statistikası football-data.co.uk əsas liqalarında, Open Matchday-də və ESPN-in yüklədiyi oyunlarda var. Statistikası olmayan oyunlar müvafiq statistik filtrdə uyğun sayılmır.')
+        st.write(f'Əlavə liqa faylları (football-data.co.uk/new): {len(list(FDX_DIR.glob("*.csv"))) if FDX_DIR.exists() else 0}. openfootball faylları: {len(list(OF_DIR.glob("*.json"))) if OF_DIR.exists() else 0}.')
+        if FD_DIR.exists() and any(FD_DIR.glob('*.csv')):
+            st.write(f'football-data.co.uk faylları: {len(list(FD_DIR.glob("*.csv")))}.')
+        else:
+            st.write('football-data.co.uk hələ yüklənməyib — sol paneldən "Məlumatı yenilə" düyməsinə bas.')
+        if (ESPN_DIR / 'results.csv').exists():
+            st.write('ESPN fayllarından oxunan nəticə sayı: ' + str(len(read_csv_safe(ESPN_DIR / 'results.csv'))) + '.')
+        else:
+            st.write('ESPN hələ yüklənməyib — sol paneldən "Məlumatı yenilə" düyməsinə bas.')
+        if fd_only_teams:
+            st.write(f'Yalnız football-data.co.uk-də tapılan komandalar: {len(fd_only_teams)}. Əgər bunların arasında Open Matchday-də başqa cür yazılan komanda varsa, app.py-dakı ALIASES siyahısına əlavə et.')
+            st.code('\n'.join(fd_only_teams))
