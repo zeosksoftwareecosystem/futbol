@@ -1273,6 +1273,57 @@ if fixtures.empty:
     st.error('Oyun cədvəlləri tapılmadı. ZIP-i tam çıxartdığını yoxla və ya yuxarıdakı "Məlumatı yenilə" düyməsindən yenilə.')
     st.stop()
 
+# ---- Adla saxlanılan filtr dəstləri ----
+NAMED_FILTERS_FILE = ROOT / 'named_filters.json'
+_PRESET_PREFIXES = ('match_', 'club_', 'min_', 'on_', 'mode_', 'corners_', 'shots_', 'target_')
+_PRESET_EXPLICIT = {'btts', 'btts_no', 'under25', 'ht05_under', 'ht15_under', 'ht_draw',
+                    'match_goal_25', 'match_goal_35', 'match_goal_45', 'club_goal_05',
+                    'club_goal_15', 'club_goal_25', 'match_ht05', 'match_ht15',
+                    'club_ht05', 'club_ht15', 'n_games', 'd_from', 'd_to'}
+
+def _read_named_filters():
+    try:
+        data = json.loads(NAMED_FILTERS_FILE.read_text(encoding='utf-8')) if NAMED_FILTERS_FILE.exists() else {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def _apply_named_filter(name):
+    presets = _read_named_filters()
+    payload = presets.get(name, {})
+    for key, value in payload.items():
+        if key in ('d_from', 'd_to'):
+            try:
+                st.session_state[key] = datetime.strptime(value, '%Y-%m-%d').date()
+            except Exception:
+                pass
+        elif key == 'lg_sel':
+            st.session_state[key] = set(value or [])
+        else:
+            st.session_state[key] = value
+
+# Bu blok tarix və filtr widget-ləri yaranmazdan əvvəl işləyir ki, seçilmiş preset tətbiq olunsun.
+_named_filters = _read_named_filters()
+if _named_filters:
+    with st.container(border=True):
+        st.markdown('**📌 Yadda saxlanılan filtrlər**')
+        _preset_names = list(_named_filters.keys())
+        _p1, _p2, _p3 = st.columns([3, 1, 1])
+        _selected_preset = _p1.selectbox('Filtr seç', _preset_names, key='named_filter_choice', label_visibility='collapsed')
+        if _p2.button('📂 Yüklə', key='load_named_filter', use_container_width=True):
+            _apply_named_filter(_selected_preset)
+            st.session_state['_loaded_preset_msg'] = f'“{_selected_preset}” filtri tətbiq edildi. Analizi yenidən başladın.'
+            st.rerun()
+        if _p3.button('🗑️ Sil', key='delete_named_filter', use_container_width=True):
+            _named_filters.pop(_selected_preset, None)
+            try:
+                NAMED_FILTERS_FILE.write_text(json.dumps(_named_filters, ensure_ascii=False, indent=2), encoding='utf-8')
+            except Exception as e:
+                st.error(f'Filtri silmək olmadı: {e}')
+            st.rerun()
+if st.session_state.get('_loaded_preset_msg'):
+    st.info(st.session_state.pop('_loaded_preset_msg'))
+
 today = baku_today()   # Bakı vaxtı ilə bu gün (server UTC olsa belə)
 st.session_state.setdefault('d_from', today)
 st.session_state.setdefault('d_to', today)
@@ -1821,7 +1872,37 @@ def render_analysis(A, cur_key):
     st.caption('Komandaların əvvəlki oyunları liqa və kubok daxil olmaqla bütün mövcud nəticələrdən, hədəf oyunun tarixindən əvvəl axtarılır. '
                f'Saatlar Bakı vaxtı ilədir. ⏱ {A.get("secs", 0):.1f} san.')
     if A.get('filters'):
-        st.caption('🎯 Tapılma şərti: ' + ' + '.join(A['filters']) + f" · hər komandanın son {A['n_games']} oyununda hamısı ödənməlidir")
+        _used_filters = ' + '.join(A['filters'])
+        st.markdown('### 🎯 Bu analizdə istifadə olunan filtrlər')
+        st.info(_used_filters + f"\n\nHər komandanın son **{A['n_games']}** oyununda bütün şərtlər ödənməlidir.\n\nTarix: **{A.get('date_from', '')} → {A.get('date_to', '')}** · Liqalar: **{A.get('leagues', '—')}**")
+        with st.form('save_named_filter_form', clear_on_submit=False):
+            _sf1, _sf2 = st.columns([4, 1])
+            _preset_name = _sf1.text_input('Filtr üçün ad yaz', placeholder='Məsələn: Künc 9+ və zərbə 22+', key='new_named_filter_name')
+            _save_preset = _sf2.form_submit_button('💾 Save', use_container_width=True)
+            if _save_preset:
+                _name = _preset_name.strip()
+                if not _name:
+                    st.warning('Əvvəl filtrə ad yaz.')
+                else:
+                    _payload = {}
+                    for _k, _v in st.session_state.items():
+                        if isinstance(_k, str) and (_k in _PRESET_EXPLICIT or _k.startswith(_PRESET_PREFIXES)):
+                            if isinstance(_v, (bool, int, float, str)):
+                                _payload[_k] = _v
+                    for _dk in ('d_from', 'd_to'):
+                        if _dk in st.session_state:
+                            _payload[_dk] = st.session_state[_dk].isoformat()
+                    if 'lg_sel' in st.session_state:
+                        _payload['lg_sel'] = sorted(str(x) for x in st.session_state['lg_sel'])
+                    _all_presets = _read_named_filters()
+                    _all_presets[_name] = _payload
+                    try:
+                        NAMED_FILTERS_FILE.write_text(json.dumps(_all_presets, ensure_ascii=False, indent=2), encoding='utf-8')
+                        st.success(f'“{_name}” adı ilə filtr yadda saxlanıldı. Yuxarıdakı siyahıdan sonradan yükləyə bilərsən.')
+                    except Exception as e:
+                        st.error(f'Filtri yadda saxlamaq olmadı: {e}')
+    else:
+        st.caption('Bu analiz üçün aktiv filtr adı mövcud deyil.')
     if A.get('key') != cur_key:
         st.warning('Filtrlər və ya tarix dəyişib — göstərilən nəticə əvvəlki seçimlərə aiddir. Yenisi üçün "Oyunları analiz et" düyməsinə bas.')
     if not passed:
