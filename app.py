@@ -2134,12 +2134,17 @@ with st.expander('📈 Geriyə test — seçilmiş filtr keçmişdə neçə faiz
 # Öz qovluğunu istifadə edir (football-data-odds), mövcud məlumat bazasına toxunmur.
 KO_DIR = ROOT / 'football-data-odds'
 KO_N_SEASONS = 8
-KO_COLS = {
-    'h': ['AvgH', 'BbAvH', 'B365H', 'PSH', 'BWH', 'WHH'],
-    'd': ['AvgD', 'BbAvD', 'B365D', 'PSD', 'BWD', 'WHD'],
-    'a': ['AvgA', 'BbAvA', 'B365A', 'PSA', 'BWA', 'WHA'],
-    'o': ['Avg>2.5', 'BbAv>2.5', 'B365>2.5', 'P>2.5'],
-    'u': ['Avg<2.5', 'BbAv<2.5', 'B365<2.5', 'P<2.5'],
+KO_SRC = {   # kofsent mənbəyi: football-data.co.uk fayllarındakı sütunlar
+    'avg': {'label': 'Orta bazar', 'cols': {
+        'h': ['AvgH', 'BbAvH', 'B365H', 'PSH', 'BWH', 'WHH'],
+        'd': ['AvgD', 'BbAvD', 'B365D', 'PSD', 'BWD', 'WHD'],
+        'a': ['AvgA', 'BbAvA', 'B365A', 'PSA', 'BWA', 'WHA'],
+        'o': ['Avg>2.5', 'BbAv>2.5', 'B365>2.5', 'P>2.5'],
+        'u': ['Avg<2.5', 'BbAv<2.5', 'B365<2.5', 'P<2.5']}},
+    'b365': {'label': 'Bet365', 'cols': {
+        'h': ['B365H'], 'd': ['B365D'], 'a': ['B365A'], 'o': ['B365>2.5'], 'u': ['B365<2.5']}},
+    'ps': {'label': 'Pinnacle', 'cols': {
+        'h': ['PSH', 'PH'], 'd': ['PSD', 'PD'], 'a': ['PSA', 'PA'], 'o': ['P>2.5'], 'u': ['P<2.5']}},
 }
 
 
@@ -2195,8 +2200,9 @@ def _ko_prepare(df):
     div = df['Div'] if 'Div' in df.columns else pd.Series('FD', index=df.index)
     out['league'] = div.map(FD_LEAGUES).fillna(div)
     out['time'] = df['Time'].astype(str) if 'Time' in df.columns else ''
-    for k, cols in KO_COLS.items():
-        out['o_' + k] = _ko_pick(df, cols)
+    for sk, sv in KO_SRC.items():
+        for k, cols in sv['cols'].items():
+            out[f'{sk}_{k}'] = _ko_pick(df, cols)
     for src, dst in (('FTHG', 'ft_h'), ('FTAG', 'ft_a'), ('HTHG', 'ht_h'), ('HTAG', 'ht_a')):
         out[dst] = pd.to_numeric(df[src], errors='coerce') if src in df.columns else np.nan
     return out
@@ -2234,6 +2240,83 @@ def ko_load_fixtures():
     return f.dropna(subset=['date'])
 
 
+# ---- Yaxın oyunlar: The Odds API (pulsuz açar lazımdır, ayda 500 kredit) ----
+ODDS_API = 'https://api.the-odds-api.com/v4'
+
+
+def ko_api_key():
+    try:
+        k = st.secrets.get('ODDS_API_KEY', '')
+    except Exception:
+        k = ''
+    return str(k or '').strip()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def ko_api_sports(key):
+    r = requests.get(f'{ODDS_API}/sports', params={'apiKey': key}, timeout=20)
+    r.raise_for_status()
+    return [(x['key'], f"{x.get('description') or x['title']}") for x in r.json()
+            if x.get('group') == 'Soccer' and x.get('active') and not x.get('has_outrights')]
+
+
+def _ko_mean(v):
+    v = [x for x in v if x]
+    return round(sum(v) / len(v), 3) if v else np.nan
+
+
+def _ko_api_row(ev, league):
+    per, pin, b365 = [], None, None
+    for b in ev.get('bookmakers', []):
+        h = d = a = o = u = None
+        for m in b.get('markets', []):
+            if m.get('key') == 'h2h':
+                for oc in m.get('outcomes', []):
+                    if oc.get('name') == ev.get('home_team'):
+                        h = oc.get('price')
+                    elif oc.get('name') == ev.get('away_team'):
+                        a = oc.get('price')
+                    elif oc.get('name') == 'Draw':
+                        d = oc.get('price')
+            elif m.get('key') == 'totals':
+                for oc in m.get('outcomes', []):
+                    if oc.get('point') == 2.5:
+                        if oc.get('name') == 'Over':
+                            o = oc.get('price')
+                        elif oc.get('name') == 'Under':
+                            u = oc.get('price')
+        tup = (h, d, a, o, u)
+        per.append(tup)
+        if b.get('key') == 'pinnacle':
+            pin = tup
+        if b.get('key') == 'bet365':
+            b365 = tup
+    avg = tuple(_ko_mean([t[i] for t in per]) for i in range(5))
+    t = pd.to_datetime(ev.get('commence_time'), utc=True).tz_convert(None) + pd.Timedelta(hours=4)   # Bakı vaxtı
+    row = {'date': t.normalize(), 'time': f'{t:%H:%M}', 'home': ev.get('home_team'), 'away': ev.get('away_team'), 'league': league}
+    for sk, tup in (('avg', avg), ('ps', pin or (None,) * 5), ('b365', b365 or avg)):   # Odds API-də Bet365 yoxdursa orta kofsent
+        for k, v in zip('hdaou', tup):
+            row[f'{sk}_{k}'] = v if v else np.nan
+    return row
+
+
+def ko_api_fetch(key, sports, names):
+    rows, errs, left = [], [], None
+    for sk in sports:
+        try:
+            r = requests.get(f'{ODDS_API}/sports/{sk}/odds', timeout=25, params={
+                'apiKey': key, 'regions': 'eu', 'markets': 'h2h,totals', 'oddsFormat': 'decimal', 'dateFormat': 'iso'})
+        except requests.RequestException as e:
+            errs.append(f'{names.get(sk, sk)}: {e}')
+            continue
+        left = r.headers.get('x-requests-remaining', left)
+        if r.status_code != 200:
+            errs.append(f'{names.get(sk, sk)}: HTTP {r.status_code}')
+            continue
+        rows += [_ko_api_row(ev, names.get(sk, sk)) for ev in r.json()]
+    return (pd.DataFrame(rows) if rows else pd.DataFrame()), errs, left
+
+
 def _ko_pct(a, b):
     return f'{a / b * 100:.1f}%' if b else '-'
 
@@ -2252,15 +2335,67 @@ def render_kofsent_section():
         st.info('Tarixçə hələ yüklənməyib. Yuxarıdakı düyməyə bas (ilk dəfə 10-15 dəqiqə çəkə bilər).')
         return
 
+    # ---- Kofsent mənbəyi: arxivdəki hansı bukmekerin kofsenti ilə müqayisə olunsun ----
+    src = st.radio('Kofsent mənbəyi (arxivdə hansı bukmekerin kofsenti ilə axtarılsın)', list(KO_SRC), index=1, horizontal=True,
+                   format_func=lambda k: KO_SRC[k]['label'], key='ko_src',
+                   on_change=lambda: st.session_state.update(ko_game='—'),
+                   help='Arxivdə yalnız bu bukmekerlər var: Bet365, Pinnacle və bir çox bukmekerin orta kofsenti. '
+                        '1xBet, Melbet və s. arxivdə yoxdur, onların kofsenti adətən bir neçə faiz fərqlənir, "Kofsent fərqi" bunu əhatə edir.')
+    hist = hist.assign(**{f'o_{k}': hist[f'{src}_{k}'] for k in 'hdaou'})
+
+    # ---- Yaxın oyunlar (bütün liqalar): The Odds API ----
+    with st.container(border=True):
+        st.markdown('**🌍 Yaxın oyunların kofsentləri (daha çox liqa)** — football-data.co.uk-nin faylı yalnız həftə sonu və əsas liqaları saxlayır')
+        key = ko_api_key()
+        if not key:
+            key = st.text_input('The Odds API açarı', type='password', key='ko_api_key_in',
+                                help='Pulsuz açar: the-odds-api.com → "Get API Key". Ayda 500 kredit verilir. Daimi saxlamaq üçün Streamlit Secrets-də ODDS_API_KEY adı ilə yazın.').strip()
+        if not key:
+            st.caption('Açar yazsan, istənilən liqanın yaxın oyunları kofsentləri ilə gələcək. Açarsız yalnız football-data faylındakı oyunlar görünür.')
+        else:
+            try:
+                sports = ko_api_sports(key)
+            except Exception as e:
+                sports = []
+                st.error(f'Açar qəbul olunmadı və ya xəta: {e}')
+            names = dict(sports)
+            chosen = st.multiselect('Liqalar', list(names), format_func=lambda k_: names[k_], key='ko_api_leagues',
+                                    help='Hər liqa 2 kredit çəkir. Yalnız lazım olanları seç.')
+            if st.button('📡 Seçilmiş liqaların kofsentlərini gətir', key='ko_api_go', disabled=not chosen):
+                with st.spinner('Yüklənir...'):
+                    dfa, errs, left = ko_api_fetch(key, chosen, names)
+                st.session_state['ko_api_df'] = dfa
+                if errs:
+                    st.warning('Yüklənməyənlər: ' + '; '.join(errs))
+                st.success(f'{len(dfa)} oyun gətirildi.' + (f' Qalan kredit: {left}.' if left is not None else ''))
+            if st.session_state.get('ko_api_df') is not None and len(st.session_state['ko_api_df']):
+                st.caption('Bet365 Odds API-də yoxdur: "Bet365" seçsən bu oyunlarda orta kofsent göstərilir. Pinnacle varsa göstərilir.')
+
     # ---- Oyun seçimi (kofsentlər avtomatik dolur) ----
     fx = ko_load_fixtures()
+    api_df = st.session_state.get('ko_api_df')
+    if api_df is not None and len(api_df):
+        fx = pd.concat([fx, api_df], ignore_index=True) if not fx.empty else api_df.copy()
+    if not fx.empty:
+        fx = fx.assign(**{f'o_{k}': fx[f'{src}_{k}'] for k in 'hdaou'})
     lookup = {}
     if not fx.empty:
-        span = st.radio('Oyunlar', ['Bu gün', 'Bu gün + sabah', 'Növbəti 7 gün'], horizontal=True, key='ko_span')
-        days = {'Bu gün': 0, 'Bu gün + sabah': 1, 'Növbəti 7 gün': 7}[span]
+        span = st.radio('Oyunlar', ['Bu gün', 'Bu gün + sabah', 'Növbəti 7 gün', 'Fayldakı hamısı'], horizontal=True, key='ko_span')
+        days = {'Bu gün': 0, 'Bu gün + sabah': 1, 'Növbəti 7 gün': 7}.get(span)
         t0 = baku_today()
-        f = fx[(fx['date'].dt.date >= t0) & (fx['date'].dt.date <= t0 + timedelta(days=days))]
+        f = fx if days is None else fx[(fx['date'].dt.date >= t0) & (fx['date'].dt.date <= t0 + timedelta(days=days))]
         f = f.dropna(subset=['o_h', 'o_d', 'o_a'], how='all').sort_values(['date', 'time'])
+        if f.empty:
+            st.caption(f'Bu seçim üçün oyun yoxdur. Fayldakı oyunların tarixi: {fx["date"].min():%d.%m.%Y} – {fx["date"].max():%d.%m.%Y}. '
+                       '"Fayldakı hamısı"nı seç və ya kofsentləri əllə yaz.')
+        else:
+            _fcfg = {c_: st.column_config.NumberColumn(c_, format='%.2f') for c_ in ('1', 'X', '2', '2.5 üst', '2.5 alt')}
+            st.dataframe(pd.DataFrame({
+                'Tarix': f['date'].dt.strftime('%d.%m.%Y'),
+                'Saat': f['time'].replace('nan', ''),
+                'Liqa': f['league'], 'Ev sahibi': f['home'], 'Qonaq': f['away'],
+                '1': f['o_h'], 'X': f['o_d'], '2': f['o_a'], '2.5 üst': f['o_o'], '2.5 alt': f['o_u'],
+            }), hide_index=True, use_container_width=True, column_config=_fcfg, height=min(420, 38 + 35 * len(f)))
         for _, r in f.iterrows():
             fmt = lambda v: f'{v:.2f}' if pd.notna(v) else '-'
             lab = f"{r['date']:%d.%m} {r['time'] if r['time'] not in ('', 'nan') else ''} · {r['league']} · {r['home']} – {r['away']} · {fmt(r['o_h'])} / {fmt(r['o_d'])} / {fmt(r['o_a'])}"
