@@ -1192,7 +1192,7 @@ def _live_one(slug):
     t0 = datetime.utcnow().date()
     rng = f"{(t0 - timedelta(days=1)).strftime('%Y%m%d')}-{(t0 + timedelta(days=1)).strftime('%Y%m%d')}"
     try:
-        r = requests.get(f'{ESPN_BASE}/{slug}/scoreboard', params={'dates': rng, 'limit': 300}, timeout=12,
+        r = requests.get(f'{ESPN_BASE}/{slug}/scoreboard', params={'dates': rng, 'limit': 300}, timeout=5,
                          headers={'User-Agent': 'FutbolFiltri/1.0'})
         if r.status_code != 200:
             return []
@@ -1223,12 +1223,23 @@ def _live_one(slug):
     return out
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=180, show_spinner=False)
 def fetch_live_scores():
+    # Ümumi vaxt limiti 8 san: ESPN yavaş olsa belə səhifə donmur, gələnlərlə kifayətlənir
+    from concurrent.futures import as_completed, TimeoutError as _FTimeout
     slugs = list(dict.fromkeys(list(ESPN_LEAGUES) + LIVE_EXTRA_SLUGS))
-    with ThreadPoolExecutor(max_workers=12) as ex:
-        parts = list(ex.map(_live_one, slugs))
-    rows = [r for p in parts for r in p]
+    ex = ThreadPoolExecutor(max_workers=24)
+    futs = [ex.submit(_live_one, sl) for sl in slugs]
+    rows = []
+    try:
+        for f in as_completed(futs, timeout=8):
+            try:
+                rows.extend(f.result())
+            except Exception:
+                pass
+    except _FTimeout:
+        pass
+    ex.shutdown(wait=False, cancel_futures=True)
     for r in rows:
         r['home_k'], r['away_k'] = team_key(r['home']), team_key(r['away'])
     return rows
@@ -1395,15 +1406,20 @@ with st.container(border=True):
     # Seçilmiş tarix aralığında hansı liqalarda neçə oyun var (analizdəki məntiqlə eyni: keçmiş — nəticələr, bu gün və sonrası — cədvəl)
     d_from, d_to, d_today = pd.Timestamp(date_from), pd.Timestamp(date_to), pd.Timestamp(today)
 
-    def _games_in_range(df, past):
-        if df.empty:
-            return df
-        d = df['date'].dt.normalize()
-        keep = (d >= d_from) & (d <= d_to) & ((d < d_today) if past else (d >= d_today))
-        return df[keep]
+    @st.cache_data(show_spinner=False, max_entries=64)
+    def _games_per_league(_fx, _rs, d_from, d_to, d_today, sig):
+        def _in(df, past):
+            if df.empty:
+                return df
+            d = df['date'].dt.normalize()
+            keep = (d >= d_from) & (d <= d_to) & ((d < d_today) if past else (d >= d_today))
+            return df[keep]
+        rng = pd.concat([_in(_rs, True), _in(_fx, False)], ignore_index=True)
+        if rng.empty:
+            return {}
+        return rng.drop_duplicates(subset=['date', 'home_k', 'away_k'])['league'].value_counts().to_dict()
 
-    _rng = pd.concat([_games_in_range(results, True), _games_in_range(fixtures, False)], ignore_index=True)
-    games_per_league = _rng.drop_duplicates(subset=['date', 'home_k', 'away_k'])['league'].value_counts().to_dict() if not _rng.empty else {}
+    games_per_league = _games_per_league(fixtures, results, d_from, d_to, d_today, (len(fixtures), len(results), str(results['date'].max())))
     leagues_with_games = [l for l in league_options if games_per_league.get(l, 0) > 0]
 
     with st.expander(f'🏆 Liqalar — {len(league_options)} liqa var · seçilmiş tarixdə oyunu olan: {len(leagues_with_games)} (açıb seç)', expanded=False):
@@ -1788,12 +1804,7 @@ def analyze(n, date_from, date_to, sel_leagues, all_leagues):
         res_idx = {}
         for hk_, ak_, d_, fh_, fa_ in rr.itertuples(index=False):
             res_idx.setdefault((hk_, ak_), []).append((d_, int(fh_), int(fa_)))
-        live_rows = []
-        if any(pd.to_datetime(it['Tarix']).date() >= today - timedelta(days=1) for it in passed):
-            try:
-                live_rows = fetch_live_scores()
-            except Exception:
-                live_rows = []
+        live_rows = []   # canlı hesab söndürülüb (yavaşladırdı); hesab yalnız nəticələr bazasından götürülür
         for it in passed:
             it['Hesab'], it['Status'] = lookup_score(it['_hk'], it['_ak'], pd.to_datetime(it['Tarix']), res_idx, live_rows)
     return {'passed': passed, 'checked': len(dg), 'skipped': skipped,
