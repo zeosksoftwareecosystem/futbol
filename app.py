@@ -2317,6 +2317,46 @@ def ko_api_fetch(key, sports, names):
     return (pd.DataFrame(rows) if rows else pd.DataFrame()), errs, left
 
 
+def ko_batch(f, hist, tol, years, sel):
+    """Siyahıdakı hər oyun üçün: keçmişdə eyni kofsentli oyunlar neçə faiz necə bitib."""
+    cut = pd.Timestamp(baku_today()) - pd.Timedelta(days=365 * years)
+    H = hist[hist['date'] >= cut]
+    if sel:
+        H = H[H['league'].isin(sel)]
+    oh, od, oa = (H[c].to_numpy(float) for c in ('o_h', 'o_d', 'o_a'))
+    fh, fa = H['ft_h'].to_numpy(float), H['ft_a'].to_numpy(float)
+    hh, ha = H['ht_h'].to_numpy(float), H['ht_a'].to_numpy(float)
+    tot = fh + fa
+    rows = []
+    for _, r in f.iterrows():
+        if not all(pd.notna(r[c]) and r[c] > 1 for c in ('o_h', 'o_d', 'o_a')):
+            continue
+        with np.errstate(invalid='ignore'):
+            m = ((np.abs(oh - r['o_h']) <= r['o_h'] * tol / 100) & (np.abs(od - r['o_d']) <= r['o_d'] * tol / 100)
+                 & (np.abs(oa - r['o_a']) <= r['o_a'] * tol / 100))
+        n = int(m.sum())
+        raw = [1 / r['o_h'], 1 / r['o_d'], 1 / r['o_a']]
+        sm = sum(raw)
+        row = {'Tarix': f"{r['date']:%d.%m}", 'Saat': '' if str(r['time']) in ('', 'nan') else r['time'], 'Liqa': r['league'],
+               'Ev sahibi': r['home'], 'Qonaq': r['away'],
+               'Kofsent': f"{r['o_h']:.2f} / {r['o_d']:.2f} / {r['o_a']:.2f}",
+               'Bukmeker 1/X/2 %': ' / '.join(f'{x / sm * 100:.0f}' for x in raw), 'Oxşar oyun': n}
+        if n:
+            def p(mask):
+                return round(float(mask[m].sum()) / n * 100, 1)
+            p1, px, p2 = p(fh > fa), p(fh == fa), p(fh < fa)
+            hm = m & ~np.isnan(hh) & ~np.isnan(ha)
+            k = int(hm.sum())
+            row.update({'1 %': p1, 'X %': px, '2 %': p2,
+                        'Ən çox': ['1', 'X', '2'][int(np.argmax([p1, px, p2]))],
+                        'Üst 1.5 %': p(tot > 1.5), 'Üst 2.5 %': p(tot > 2.5), 'Hər ikisi vurur %': p((fh > 0) & (fa > 0)),
+                        'I yarı üst 0.5 %': round(float(((hh + ha) > 0.5)[hm].sum()) / k * 100, 1) if k else None,
+                        'Orta qol': round(float(tot[m].mean()), 2)})
+        row['Etibar'] = '' if n >= 30 else ('⚠️ az oyun' if n else '⚠️ yoxdur')
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def _ko_pct(a, b):
     return f'{a / b * 100:.1f}%' if b else '-'
 
@@ -2379,6 +2419,7 @@ def render_kofsent_section():
     if not fx.empty:
         fx = fx.assign(**{f'o_{k}': fx[f'{src}_{k}'] for k in 'hdaou'})
     lookup = {}
+    f = pd.DataFrame()
     if not fx.empty:
         span = st.radio('Oyunlar', ['Bu gün', 'Bu gün + sabah', 'Növbəti 7 gün', 'Fayldakı hamısı'], horizontal=True, key='ko_span')
         days = {'Bu gün': 0, 'Bu gün + sabah': 1, 'Növbəti 7 gün': 7}.get(span)
@@ -2431,6 +2472,19 @@ def render_kofsent_section():
     years = c2[1].slider('Neçə il geriyə', 1, KO_N_SEASONS, KO_N_SEASONS, key='ko_years')
     leagues = sorted(hist['league'].dropna().unique())
     sel = c2[2].multiselect('Liqa (boş = hamısı)', leagues, key='ko_leagues')
+
+    if len(f):
+        st.divider()
+        if st.toggle('📊 Yuxarıdakı bütün oyunlar üçün keçmiş analizi avtomatik göstər', value=True, key='ko_batch_on'):
+            B = ko_batch(f, hist, tol, years, sel)
+            if B.empty:
+                st.info('Bu oyunların 1/X/2 kofsentləri tam deyil, analiz hesablanmadı.')
+            else:
+                st.caption('Hər oyun üçün: keçmişdə eyni 1/X/2 kofsentli oyunlarda nəticələrin faizi. "Bukmeker %" kofsentin özündən çıxan gözləntidir. '
+                           'Sütun başlığına basıb sıralaya bilərsən. Oxşar oyun 30-dan azdırsa, faizə etibar etmə.')
+                st.dataframe(B, hide_index=True, use_container_width=True, height=min(560, 38 + 35 * len(B)))
+        st.divider()
+        st.markdown('**Tək oyunu ətraflı analiz et** (yuxarıdan oyun seç və ya kofsentləri yaz):')
 
     given = [(col, v) for col, v in (('o_h', h), ('o_d', d), ('o_a', a), ('o_o', o), ('o_u', u)) if v > 1]
     if not given:
