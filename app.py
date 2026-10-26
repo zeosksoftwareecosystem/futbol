@@ -2129,6 +2129,260 @@ with st.expander('📈 Geriyə test — seçilmiş filtr keçmişdə neçə faiz
         except Exception as e:
             st.error(f'Geriyə test hesablanmadı: {e}')
 
+# ===== KOFSENT BÖLMƏSİ (başlanğıc) =====
+# Seçilmiş kofsentlərə yaxın olan keçmiş oyunları tapır və analiz edir (1/X/2, üst/alt, I yarı, hər iki komanda qol vurur).
+# Öz qovluğunu istifadə edir (football-data-odds), mövcud məlumat bazasına toxunmur.
+KO_DIR = ROOT / 'football-data-odds'
+KO_N_SEASONS = 8
+KO_COLS = {
+    'h': ['AvgH', 'BbAvH', 'B365H', 'PSH', 'BWH', 'WHH'],
+    'd': ['AvgD', 'BbAvD', 'B365D', 'PSD', 'BWD', 'WHD'],
+    'a': ['AvgA', 'BbAvA', 'B365A', 'PSA', 'BWA', 'WHA'],
+    'o': ['Avg>2.5', 'BbAv>2.5', 'B365>2.5', 'P>2.5'],
+    'u': ['Avg<2.5', 'BbAv<2.5', 'B365<2.5', 'P<2.5'],
+}
+
+
+def ko_seasons(n=KO_N_SEASONS):
+    now = datetime.now()
+    y = now.year if now.month >= 7 else now.year - 1
+    return [f'{(y - k) % 100:02d}{(y - k + 1) % 100:02d}' for k in range(n)]
+
+
+def ko_refresh():
+    """Son 8 mövsümün fayllarını və fixtures.csv-ni yükləyir. (uğurlu, cəmi, fixtures_ok) qaytarır."""
+    KO_DIR.mkdir(exist_ok=True)
+    jobs = [(s, c) for s in ko_seasons() for c in FD_LEAGUES]
+
+    def one(job):
+        s, c = job
+        try:
+            r = requests.get(f'{FD_BASE}/mmz4281/{s}/{c}.csv', timeout=20, headers={'User-Agent': 'FutbolFiltri/1.0'})
+            if r.status_code == 200 and len(r.content) > 200:
+                (KO_DIR / f'{s}_{c}.csv').write_bytes(r.content)
+                return True
+        except requests.RequestException:
+            pass
+        return False
+
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        ok = sum(1 for x in ex.map(one, jobs) if x)
+    fx_ok = False
+    try:
+        r = requests.get(f'{FD_BASE}/fixtures.csv', timeout=20, headers={'User-Agent': 'FutbolFiltri/1.0'})
+        if r.status_code == 200 and len(r.content) > 50:
+            (KO_DIR / 'fixtures.csv').write_bytes(r.content)
+            fx_ok = True
+    except requests.RequestException:
+        pass
+    return ok, len(jobs), fx_ok
+
+
+def _ko_pick(df, cols):
+    """Bir bazar üçün ilk mövcud kofsent sütununu götürür (orta bazar → konkret bukmekerlər)."""
+    present = [c for c in cols if c in df.columns]
+    if not present:
+        return pd.Series(np.nan, index=df.index)
+    x = df[present].apply(pd.to_numeric, errors='coerce')
+    x = x.where(x > 1)
+    return x.bfill(axis=1).iloc[:, 0]
+
+
+def _ko_prepare(df):
+    if df is None or df.empty or 'HomeTeam' not in df.columns or 'Date' not in df.columns:
+        return None
+    out = pd.DataFrame({'date': parse_fd_date(df['Date']), 'home': df['HomeTeam'], 'away': df['AwayTeam']})
+    div = df['Div'] if 'Div' in df.columns else pd.Series('FD', index=df.index)
+    out['league'] = div.map(FD_LEAGUES).fillna(div)
+    out['time'] = df['Time'].astype(str) if 'Time' in df.columns else ''
+    for k, cols in KO_COLS.items():
+        out['o_' + k] = _ko_pick(df, cols)
+    for src, dst in (('FTHG', 'ft_h'), ('FTAG', 'ft_a'), ('HTHG', 'ht_h'), ('HTAG', 'ht_a')):
+        out[dst] = pd.to_numeric(df[src], errors='coerce') if src in df.columns else np.nan
+    return out
+
+
+def ko_sig():
+    if not KO_DIR.exists():
+        return ()
+    return tuple((f.name, f.stat().st_size) for f in sorted(KO_DIR.glob('[0-9]*_*.csv')))
+
+
+@st.cache_data(show_spinner='Kofsent tarixçəsi oxunur...')
+def ko_load_history(sig):
+    frames = []
+    for f in sorted(KO_DIR.glob('[0-9]*_*.csv')):
+        p = _ko_prepare(read_csv_safe(f))
+        if p is not None:
+            frames.append(p)
+    if not frames:
+        return pd.DataFrame()
+    h = pd.concat(frames, ignore_index=True)
+    h = h.dropna(subset=['date', 'ft_h', 'ft_a'])
+    return h.sort_values('date', ascending=False).reset_index(drop=True)
+
+
+def ko_load_fixtures():
+    p = KO_DIR / 'fixtures.csv'
+    if not p.exists():
+        p = FD_DIR / 'fixtures.csv'
+    if not p.exists():
+        return pd.DataFrame()
+    f = _ko_prepare(read_csv_safe(p))
+    if f is None:
+        return pd.DataFrame()
+    return f.dropna(subset=['date'])
+
+
+def _ko_pct(a, b):
+    return f'{a / b * 100:.1f}%' if b else '-'
+
+
+def render_kofsent_section():
+    st.caption('Kofsentləri seç (və ya əllə yaz) — proqram keçmişdə eyni kofsentli oyunları tapıb nəticələrini göstərir: '
+               '1/X/2, üst/alt, ilk yarı, hər iki komanda qol vurur. Mənbə: football-data.co.uk (əsas Avropa liqaları). '
+               'Keçmiş faiz gələcək nəticəyə zəmanət vermir.')
+    if st.button('📥 Kofsent tarixçəsini yüklə / yenilə (son 8 mövsüm)', key='ko_dl'):
+        with st.spinner('Yüklənir (bir neçə dəqiqə çəkə bilər)...'):
+            ok, tot, fx_ok = ko_refresh()
+        ko_load_history.clear()
+        st.success(f'{ok} / {tot} fayl yükləndi' + ('' if fx_ok else '. Bu günün oyunları (fixtures.csv) yüklənmədi.'))
+    hist = ko_load_history(ko_sig())
+    if hist.empty:
+        st.info('Tarixçə hələ yüklənməyib. Yuxarıdakı düyməyə bas (ilk dəfə 10-15 dəqiqə çəkə bilər).')
+        return
+
+    # ---- Oyun seçimi (kofsentlər avtomatik dolur) ----
+    fx = ko_load_fixtures()
+    lookup = {}
+    if not fx.empty:
+        span = st.radio('Oyunlar', ['Bu gün', 'Bu gün + sabah', 'Növbəti 7 gün'], horizontal=True, key='ko_span')
+        days = {'Bu gün': 0, 'Bu gün + sabah': 1, 'Növbəti 7 gün': 7}[span]
+        t0 = baku_today()
+        f = fx[(fx['date'].dt.date >= t0) & (fx['date'].dt.date <= t0 + timedelta(days=days))]
+        f = f.dropna(subset=['o_h', 'o_d', 'o_a'], how='all').sort_values(['date', 'time'])
+        for _, r in f.iterrows():
+            fmt = lambda v: f'{v:.2f}' if pd.notna(v) else '-'
+            lab = f"{r['date']:%d.%m} {r['time'] if r['time'] not in ('', 'nan') else ''} · {r['league']} · {r['home']} – {r['away']} · {fmt(r['o_h'])} / {fmt(r['o_d'])} / {fmt(r['o_a'])}"
+            lookup[lab] = r
+    if lookup:
+        for k in ('ko_h', 'ko_d', 'ko_a', 'ko_o', 'ko_u'):
+            st.session_state.setdefault(k, 0.0)
+
+        def _ko_pick_game():
+            r = lookup.get(st.session_state.get('ko_game'))
+            if r is not None:
+                for key, col in (('ko_h', 'o_h'), ('ko_d', 'o_d'), ('ko_a', 'o_a'), ('ko_o', 'o_o'), ('ko_u', 'o_u')):
+                    st.session_state[key] = round(float(r[col]), 2) if pd.notna(r[col]) else 0.0
+
+        st.selectbox('Oyun seç (kofsentlər aşağıda avtomatik dolacaq)', ['—'] + list(lookup), key='ko_game', on_change=_ko_pick_game)
+    else:
+        st.caption('Seçilmiş günlər üçün kofsentli oyun tapılmadı (fixtures.csv yalnız əsas liqaların yaxın oyunlarını saxlayır, '
+                   'məlumatı yeniləyin). Kofsentləri aşağıda əllə yaz.')
+        for k in ('ko_h', 'ko_d', 'ko_a', 'ko_o', 'ko_u'):
+            st.session_state.setdefault(k, 0.0)
+
+    c = st.columns(5)
+    h = c[0].number_input('1 (ev sahibi)', 0.0, 100.0, step=0.01, format='%.2f', key='ko_h')
+    d = c[1].number_input('X (heç-heçə)', 0.0, 100.0, step=0.01, format='%.2f', key='ko_d')
+    a = c[2].number_input('2 (qonaq)', 0.0, 100.0, step=0.01, format='%.2f', key='ko_a')
+    o = c[3].number_input('2.5 üst', 0.0, 100.0, step=0.01, format='%.2f', key='ko_o')
+    u = c[4].number_input('2.5 alt', 0.0, 100.0, step=0.01, format='%.2f', key='ko_u')
+    st.caption('0 yazılan kofsent nəzərə alınmır. Məsələn yalnız 1 = 1.25 yazsan, 1 kofsenti ~1.25 olan bütün oyunlar tapılacaq.')
+
+    c2 = st.columns(3)
+    tol = c2[0].slider('Kofsent fərqi (±%)', 1, 15, 4, key='ko_tol',
+                       help='4% olsa 3.20 üçün 3.07–3.33 aralığındakı oyunlar tapılır. Az oyun tapılsa artır.')
+    years = c2[1].slider('Neçə il geriyə', 1, KO_N_SEASONS, KO_N_SEASONS, key='ko_years')
+    leagues = sorted(hist['league'].dropna().unique())
+    sel = c2[2].multiselect('Liqa (boş = hamısı)', leagues, key='ko_leagues')
+
+    given = [(col, v) for col, v in (('o_h', h), ('o_d', d), ('o_a', a), ('o_o', o), ('o_u', u)) if v > 1]
+    if not given:
+        st.info('Ən azı bir kofsent yaz və ya yuxarıdan oyun seç.')
+        return
+    mask = hist['date'] >= (pd.Timestamp(baku_today()) - pd.Timedelta(days=365 * years))
+    for col, v in given:
+        mask &= (hist[col] - v).abs() <= v * tol / 100
+    if sel:
+        mask &= hist['league'].isin(sel)
+    M = hist[mask]
+    n = len(M)
+    base_n = int((hist['date'] >= (pd.Timestamp(baku_today()) - pd.Timedelta(days=365 * years))).sum())
+    st.markdown(f'**Tapılan keçmiş oyun: {n}** (bazada {base_n} oyun)')
+    if n == 0:
+        st.warning('Bu kofsentlərlə oyun tapılmadı. "Kofsent fərqi"ni artır və ya bəzi kofsentləri 0 et.')
+        return
+    if n < 30:
+        st.warning('⚠️ 30-dan az oyun var, faizlər təsadüfi ola bilər.')
+
+    tot = M['ft_h'] + M['ft_a']
+    # ---- 1 / X / 2 ----
+    w1, wx, w2 = int((M['ft_h'] > M['ft_a']).sum()), int((M['ft_h'] == M['ft_a']).sum()), int((M['ft_h'] < M['ft_a']).sum())
+    imp = ['', '', '']
+    if h > 1 and d > 1 and a > 1:
+        raw = [1 / h, 1 / d, 1 / a]
+        s = sum(raw)
+        imp = [f'{r / s * 100:.1f}%' for r in raw]
+    m = st.columns(3)
+    for col, lab, cnt, im in zip(m, ('1 (ev sahibi qalib)', 'X (heç-heçə)', '2 (qonaq qalib)'), (w1, wx, w2), imp):
+        col.metric(lab, f'{cnt} / {n}', _ko_pct(cnt, n), delta_color='off', help=f'Bukmekerin gözləntisi: {im}' if im else None)
+    if imp[0]:
+        st.caption(f'Bukmekerin gözləntisi (marjasız): 1 = {imp[0]}, X = {imp[1]}, 2 = {imp[2]}')
+
+    # ---- Üst / Alt ----
+    rows = []
+    for ln in (0.5, 1.5, 2.5, 3.5, 4.5):
+        ov = int((tot > ln).sum())
+        rows.append({'Xətt': f'{ln}', 'Üst (oyun)': ov, 'Üst %': _ko_pct(ov, n), 'Alt (oyun)': n - ov, 'Alt %': _ko_pct(n - ov, n)})
+    st.markdown('**Üst / Alt (tam oyun)**')
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    btts = int(((M['ft_h'] > 0) & (M['ft_a'] > 0)).sum())
+    st.caption(f'Orta qol: {tot.mean():.2f} · Hər iki komanda qol vurur: bəli {btts} ({_ko_pct(btts, n)}), xeyr {n - btts} ({_ko_pct(n - btts, n)})')
+
+    # ---- İlk yarı ----
+    HT = M.dropna(subset=['ht_h', 'ht_a'])
+    k = len(HT)
+    st.markdown(f'**İlk yarı** (məlumatı olan oyun: {k})')
+    if k:
+        hts = HT['ht_h'] + HT['ht_a']
+        rows = []
+        for ln in (0.5, 1.5):
+            ov = int((hts > ln).sum())
+            rows.append({'Xətt': f'I yarı {ln}', 'Üst (oyun)': ov, 'Üst %': _ko_pct(ov, k), 'Alt (oyun)': k - ov, 'Alt %': _ko_pct(k - ov, k)})
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        a1, ax, a2 = int((HT['ht_h'] > HT['ht_a']).sum()), int((HT['ht_h'] == HT['ht_a']).sum()), int((HT['ht_h'] < HT['ht_a']).sum())
+        st.caption(f'I yarı nəticə: 1 = {_ko_pct(a1, k)}, X = {_ko_pct(ax, k)}, 2 = {_ko_pct(a2, k)} · I yarıda orta qol: {hts.mean():.2f}')
+    else:
+        st.caption('Bu oyunlar üçün ilk yarı məlumatı yoxdur.')
+
+    # ---- Ən çox rast gələn hesablar ----
+    sc = (M['ft_h'].astype(int).astype(str) + '-' + M['ft_a'].astype(int).astype(str)).value_counts().head(6)
+    st.caption('Ən çox rast gələn hesablar: ' + ' · '.join(f'{s_} ({c_} dəfə, {_ko_pct(c_, n)})' for s_, c_ in sc.items()))
+
+    # ---- Oyun siyahısı ----
+    show = pd.DataFrame({
+        'Tarix': M['date'].dt.strftime('%d.%m.%Y'),
+        'Liqa': M['league'],
+        'Ev sahibi': M['home'],
+        'Qonaq': M['away'],
+        'Hesab': M['ft_h'].astype(int).astype(str) + '-' + M['ft_a'].astype(int).astype(str),
+        'I yarı': [f'{int(x)}-{int(y)}' if pd.notna(x) and pd.notna(y) else '?' for x, y in zip(M['ht_h'], M['ht_a'])],
+        'Kofsent 1 / X / 2': [' / '.join(f'{v:.2f}' if pd.notna(v) else '-' for v in r) for r in zip(M['o_h'], M['o_d'], M['o_a'])],
+        '2.5 üst/alt kof.': [' / '.join(f'{v:.2f}' if pd.notna(v) else '-' for v in r) for r in zip(M['o_o'], M['o_u'])],
+    })
+    st.markdown('**Keçmiş oyunlar (yeni → köhnə)**')
+    st.dataframe(show, hide_index=True, use_container_width=True, height=420)
+    st.download_button('⬇️ Siyahını CSV kimi yüklə', show.to_csv(index=False).encode('utf-8-sig'), 'kofsent_kecmis.csv', 'text/csv', key='ko_csv')
+
+
+with st.expander('🎯 Kofsent üzrə keçmiş analiz — eyni kofsentli keçmiş oyunlar', expanded=False):
+    try:
+        render_kofsent_section()
+    except Exception as e:
+        st.error(f'Kofsent bölməsi xəta verdi: {e}')
+# ===== KOFSENT BÖLMƏSİ (son) =====
+
 with st.expander('Məlumat bazası haqqında'):
     show_info = st.checkbox('Ətraflı məlumatı göstər (yavaş ola bilər)', key='show_info', value=False)
     if not show_info:
