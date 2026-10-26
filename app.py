@@ -206,7 +206,11 @@ CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 html, body, [class*="css"], .stMarkdown, button, input { font-family: 'Inter', sans-serif; }
-.block-container { padding-top: 1.1rem; padding-bottom: 6rem; max-width: 1180px; }
+.block-container { padding-top: .8rem; padding-bottom: 6rem; max-width: 1180px; }
+.block-container [data-testid="stVerticalBlock"] { gap: .55rem; }
+div[data-testid="stExpander"] summary { padding: .35rem .75rem; }
+div[data-testid="stCaptionContainer"], .stCaption { line-height: 1.3; }
+div[data-testid="stVerticalBlockBorderWrapper"] { padding-top: .1rem; }
 header[data-testid="stHeader"] { background: transparent; }
 
 .hero { background: linear-gradient(135deg, #0f766e 0%, #15803d 55%, #166534 100%);
@@ -1213,8 +1217,7 @@ if not st.session_state.get('_qp_restored'):
         pass
     st.session_state['_qp_restored'] = True
 
-with st.container(border=True):
-    st.markdown('**📚 Məlumat bazası**')
+with st.expander('📚 Məlumat bazası — yenilə', expanded=('refresh_msgs' in st.session_state)):
     if 'refresh_msgs' in st.session_state:
         for kind, text in st.session_state.pop('refresh_msgs'):
             getattr(st, kind)(text)
@@ -1307,9 +1310,7 @@ def _apply_named_filter(name):
 # Yadda saxlanılan filtrlər ana səhifədə siyahı kimi görünür.
 _named_filters = _read_named_filters()
 if _named_filters:
-    with st.container(border=True):
-        st.markdown('### 📌 Yadda saxlanılan filtrlər')
-        st.caption('Saxladığın filtrin adını, oyun sayını və seçilmiş şərtləri burada görə bilərsən.')
+    with st.expander(f'📌 Yadda saxlanılan filtrlər ({len(_named_filters)})', expanded=False):
         for _idx, (_preset_name, _preset_data) in enumerate(list(_named_filters.items())):
             _preset_data = _preset_data if isinstance(_preset_data, dict) else {}
             _meta_filters = _preset_data.get('_meta_filters', [])
@@ -2154,6 +2155,22 @@ def ko_seasons(n=KO_N_SEASONS):
     return [f'{(y - k) % 100:02d}{(y - k + 1) % 100:02d}' for k in range(n)]
 
 
+import threading
+import time as _ko_time
+
+
+def ko_fetch_fixtures():
+    try:
+        r = requests.get(f'{FD_BASE}/fixtures.csv', timeout=20, headers={'User-Agent': 'FutbolFiltri/1.0'})
+        if r.status_code == 200 and len(r.content) > 50:
+            KO_DIR.mkdir(exist_ok=True)
+            (KO_DIR / 'fixtures.csv').write_bytes(r.content)
+            return True
+    except requests.RequestException:
+        pass
+    return False
+
+
 def ko_refresh():
     """Son 8 mövsümün fayllarını və fixtures.csv-ni yükləyir. (uğurlu, cəmi, fixtures_ok) qaytarır."""
     KO_DIR.mkdir(exist_ok=True)
@@ -2172,15 +2189,40 @@ def ko_refresh():
 
     with ThreadPoolExecutor(max_workers=10) as ex:
         ok = sum(1 for x in ex.map(one, jobs) if x)
-    fx_ok = False
-    try:
-        r = requests.get(f'{FD_BASE}/fixtures.csv', timeout=20, headers={'User-Agent': 'FutbolFiltri/1.0'})
-        if r.status_code == 200 and len(r.content) > 50:
-            (KO_DIR / 'fixtures.csv').write_bytes(r.content)
-            fx_ok = True
-    except requests.RequestException:
-        pass
-    return ok, len(jobs), fx_ok
+    return ok, len(jobs), ko_fetch_fixtures()
+
+
+@st.cache_resource
+def _ko_bg():
+    return {'running': False, 'last': 0.0}
+
+
+def ko_bg_start():
+    """Fayllar yoxdursa (məs. tətbiq yenidən başlayıb) və ya fixtures köhnədirsə, özü arxa planda yükləyir. True = yüklənir."""
+    state = _ko_bg()
+    if state['running']:
+        return True
+    KO_DIR.mkdir(exist_ok=True)
+    need_hist = not any(KO_DIR.glob('[0-9]*_*.csv'))
+    fxp = KO_DIR / 'fixtures.csv'
+    need_fx = (not fxp.exists()) or (_ko_time.time() - fxp.stat().st_mtime > 6 * 3600)
+    if not (need_hist or need_fx) or _ko_time.time() - state['last'] < 600:   # uğursuz olsa 10 dəqiqə gözlə
+        return False
+    state['last'], state['running'] = _ko_time.time(), True
+
+    def job():
+        try:
+            if need_hist:
+                ko_refresh()
+            else:
+                ko_fetch_fixtures()
+        except Exception:
+            pass
+        finally:
+            state['running'] = False
+
+    threading.Thread(target=job, daemon=True).start()
+    return True
 
 
 def _ko_pick(df, cols):
@@ -2365,18 +2407,23 @@ def render_kofsent_section():
     st.caption('Kofsentləri seç (və ya əllə yaz) — proqram keçmişdə eyni kofsentli oyunları tapıb nəticələrini göstərir: '
                '1/X/2, üst/alt, ilk yarı, hər iki komanda qol vurur. Mənbə: football-data.co.uk (əsas Avropa liqaları). '
                'Keçmiş faiz gələcək nəticəyə zəmanət vermir.')
-    if st.button('📥 Kofsent tarixçəsini yüklə / yenilə (son 8 mövsüm)', key='ko_dl'):
+    busy = ko_bg_start()
+    if busy:
+        st.info('⏳ Kofsent məlumatı arxa planda yüklənir (ilk dəfə 2-5 dəqiqə çəkir). Bir azdan bura qayıdıb "Yoxla" düyməsinə bas.')
+        st.button('🔄 Yoxla', key='ko_recheck')
+    if st.button('📥 Tarixçəni əllə yenidən yüklə', key='ko_dl', help='Adətən lazım deyil, tətbiq özü yükləyir.'):
         with st.spinner('Yüklənir (bir neçə dəqiqə çəkə bilər)...'):
             ok, tot, fx_ok = ko_refresh()
         ko_load_history.clear()
         st.success(f'{ok} / {tot} fayl yükləndi' + ('' if fx_ok else '. Bu günün oyunları (fixtures.csv) yüklənmədi.'))
     hist = ko_load_history(ko_sig())
     if hist.empty:
-        st.info('Tarixçə hələ yüklənməyib. Yuxarıdakı düyməyə bas (ilk dəfə 10-15 dəqiqə çəkə bilər).')
+        if not busy:
+            st.info('Tarixçə hələ yüklənməyib. Yuxarıdakı düyməyə bas.')
         return
 
     # ---- Kofsent mənbəyi: arxivdəki hansı bukmekerin kofsenti ilə müqayisə olunsun ----
-    src = st.radio('Kofsent mənbəyi (arxivdə hansı bukmekerin kofsenti ilə axtarılsın)', list(KO_SRC), index=1, horizontal=True,
+    src = st.radio('Kofsent mənbəyi', list(KO_SRC), index=1, horizontal=True,
                    format_func=lambda k: KO_SRC[k]['label'], key='ko_src',
                    on_change=lambda: st.session_state.update(ko_game='—'),
                    help='Arxivdə yalnız bu bukmekerlər var: Bet365, Pinnacle və bir çox bukmekerin orta kofsenti. '
@@ -2384,14 +2431,15 @@ def render_kofsent_section():
     hist = hist.assign(**{f'o_{k}': hist[f'{src}_{k}'] for k in 'hdaou'})
 
     # ---- Yaxın oyunlar (bütün liqalar): The Odds API ----
-    with st.container(border=True):
-        st.markdown('**🌍 Yaxın oyunların kofsentləri (daha çox liqa)** — football-data.co.uk-nin faylı yalnız həftə sonu və əsas liqaları saxlayır')
+    _api_on = st.toggle('🌍 Daha çox liqa və yaxın oyunlar (The Odds API)', key='ko_api_show',
+                        help='football-data.co.uk-nin faylı yalnız həftə sonu və əsas liqaları saxlayır.')
+    if _api_on:
         key = ko_api_key()
         if not key:
             key = st.text_input('The Odds API açarı', type='password', key='ko_api_key_in',
-                                help='Pulsuz açar: the-odds-api.com → "Get API Key". Ayda 500 kredit verilir. Daimi saxlamaq üçün Streamlit Secrets-də ODDS_API_KEY adı ilə yazın.').strip()
+                                help='Pulsuz açar: the-odds-api.com → "Get API Key". Ayda 500 kredit. Daimi saxlamaq üçün Streamlit Secrets-də ODDS_API_KEY adı ilə yazın.').strip()
         if not key:
-            st.caption('Açar yazsan, istənilən liqanın yaxın oyunları kofsentləri ilə gələcək. Açarsız yalnız football-data faylındakı oyunlar görünür.')
+            st.caption('Açar yazsan, istənilən liqanın yaxın oyunları kofsentləri ilə gələcək.')
         else:
             try:
                 sports = ko_api_sports(key)
@@ -2399,9 +2447,11 @@ def render_kofsent_section():
                 sports = []
                 st.error(f'Açar qəbul olunmadı və ya xəta: {e}')
             names = dict(sports)
-            chosen = st.multiselect('Liqalar', list(names), format_func=lambda k_: names[k_], key='ko_api_leagues',
-                                    help='Hər liqa 2 kredit çəkir. Yalnız lazım olanları seç.')
-            if st.button('📡 Seçilmiş liqaların kofsentlərini gətir', key='ko_api_go', disabled=not chosen):
+            _c = st.columns([3, 1])
+            chosen = _c[0].multiselect('Liqalar', list(names), format_func=lambda k_: names[k_], key='ko_api_leagues',
+                                       help='Hər liqa 2 kredit çəkir. Yalnız lazım olanları seç.')
+            _c[1].markdown('<div style="height:1.7rem"></div>', unsafe_allow_html=True)
+            if _c[1].button('📡 Gətir', key='ko_api_go', disabled=not chosen, use_container_width=True):
                 with st.spinner('Yüklənir...'):
                     dfa, errs, left = ko_api_fetch(key, chosen, names)
                 st.session_state['ko_api_df'] = dfa
@@ -2409,7 +2459,7 @@ def render_kofsent_section():
                     st.warning('Yüklənməyənlər: ' + '; '.join(errs))
                 st.success(f'{len(dfa)} oyun gətirildi.' + (f' Qalan kredit: {left}.' if left is not None else ''))
             if st.session_state.get('ko_api_df') is not None and len(st.session_state['ko_api_df']):
-                st.caption('Bet365 Odds API-də yoxdur: "Bet365" seçsən bu oyunlarda orta kofsent göstərilir. Pinnacle varsa göstərilir.')
+                st.caption('Bet365 Odds API-də yoxdur: "Bet365" seçsən orta kofsent göstərilir.')
 
     # ---- Oyun seçimi (kofsentlər avtomatik dolur) ----
     fx = ko_load_fixtures()
