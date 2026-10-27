@@ -2098,6 +2098,59 @@ def hist_cards_html(records):
     return ''.join(parts)
 
 
+def _coupon_market_options():
+    """Seçim üçün əsas futbol bazarları və hazırkı filtrdəki bazarlar."""
+    opts = [
+        'Matç nəticəsi: 1', 'Matç nəticəsi: X', 'Matç nəticəsi: 2',
+        'İki komanda da qol vuracaq: Hə', 'İki komanda da qol vuracaq: Yox',
+        'Matç qolları: 0.5 üst', 'Matç qolları: 1.5 üst', 'Matç qolları: 2.5 üst',
+        'Matç qolları: 3.5 üst', 'Matç qolları: 4.5 üst',
+        'Matç qolları: 1.5 alt', 'Matç qolları: 2.5 alt', 'Matç qolları: 3.5 alt',
+        '1-ci hissə qolu: 0.5 üst', '1-ci hissə qolları: 1.5 üst',
+        '1-ci hissə qolları: 0.5 alt', '1-ci hissə qolları: 1.5 alt',
+    ]
+    opts += [f'Ümumi künclər: {x} üst' for x in (6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5)]
+    opts += [f'Ümumi künclər: {x} alt' for x in (8.5, 9.5, 10.5, 11.5, 12.5)]
+    # Hazırkı analiz filtrində seçilən şərtləri də seçim siyahısına daxil et.
+    for name, _ in active_conditions():
+        if name not in opts:
+            opts.append(name)
+    return opts
+
+
+def _render_coupon():
+    """Kupon yalnız tətbiq sessiyasında saxlanılır; seçimlər başlanma vaxtına görə düzülür."""
+    coupon = st.session_state.setdefault('football_coupon', [])
+    st.markdown('### 🎟️ Kupon')
+    if not coupon:
+        st.caption('Hələ kupona oyun əlavə edilməyib. Uyğun oyunların yanındakı ➕ düyməsindən başla.')
+        return
+    def sort_key(x):
+        d = pd.to_datetime(x.get('Tarix'), errors='coerce')
+        t = pd.to_datetime(str(x.get('Saat', '')), format='%H:%M', errors='coerce')
+        if pd.isna(d):
+            return pd.Timestamp.max
+        dt = pd.Timestamp(d.date())
+        if pd.notna(t):
+            dt += pd.Timedelta(hours=t.hour, minutes=t.minute)
+        return dt
+    coupon.sort(key=sort_key)
+    st.caption('Oyunlar ən tez başlayandan gec başlayana, tarix və saata görə sıralanır.')
+    for i, leg in enumerate(coupon):
+        c1, c2 = st.columns([5, 1])
+        with c1:
+            st.markdown(f"**{leg.get('Tarix', '')} · {leg.get('Saat', 'Saat məlum deyil')}**  ")
+            st.write(f"{leg.get('Ev sahibi', '')} — {leg.get('Qonaq', '')}")
+            st.caption(f"Seçim: {leg.get('Seçim', '')} · {leg.get('Çempionat', '')}")
+        with c2:
+            if st.button('✖', key=f'coupon_remove_{leg.get("id", i)}', help='Kupondan sil'):
+                st.session_state['football_coupon'] = [x for j, x in enumerate(coupon) if j != i]
+                st.rerun()
+    if st.button('🗑️ Kuponu təmizlə', key='coupon_clear', use_container_width=True):
+        st.session_state['football_coupon'] = []
+        st.rerun()
+
+
 def render_analysis(A, cur_key):
     passed = A['passed']
     # Sıralama: başlamayan oyunlar (ən tez başlayacaq əvvəl), sonra canlı oyunlar,
@@ -2134,6 +2187,8 @@ def render_analysis(A, cur_key):
         f'</div>', unsafe_allow_html=True)
     st.caption('Komandaların əvvəlki oyunları liqa və kubok daxil olmaqla bütün mövcud nəticələrdən, hədəf oyunun tarixindən əvvəl axtarılır. '
                f'Saatlar Bakı vaxtı ilədir. ⏱ {A.get("secs", 0):.1f} san.')
+    with st.expander('🎟️ Kupon bölməsi', expanded=bool(st.session_state.get('football_coupon'))):
+        _render_coupon()
     if A.get('filters'):
         _used_filters = ' + '.join(A['filters'])
         _auto_base = f"Son {A['n_games']} oyun — {_used_filters}"
@@ -2198,6 +2253,31 @@ def render_analysis(A, cur_key):
             if item.get('Hesab'):
                 st.markdown(f"**{_mark} {item['Hesab']}** · {item['Status']}")
             st.caption(f"{league_text} · Hər komandanın son {item['Son oyun sayı']} oyunu · Mənbə: {item['Mənbə'] or 'məlum deyil'}")
+            _match_dt = pd.to_datetime(item.get('Tarix'), errors='coerce')
+            _match_time = pd.to_datetime(str(item.get('Saat', '')), format='%H:%M', errors='coerce')
+            _kickoff = pd.Timestamp.max
+            if pd.notna(_match_dt):
+                _kickoff = pd.Timestamp(_match_dt.date())
+                if pd.notna(_match_time):
+                    _kickoff += pd.Timedelta(hours=_match_time.hour, minutes=_match_time.minute)
+            _now_baku = pd.Timestamp.now(tz='Asia/Baku').tz_localize(None)
+            _not_started = pd.notna(_match_dt) and _kickoff >= _now_baku and not live and not item.get('Hesab')
+            _coupon_id = f"{item.get('Tarix')}|{item.get('Saat')}|{item.get('_hk')}|{item.get('_ak')}"
+            if _not_started:
+                if st.button('➕ Kupona əlavə et', key=f"coupon_pick_{_coupon_id}", use_container_width=True):
+                    st.session_state['coupon_pick_id'] = _coupon_id
+                if st.session_state.get('coupon_pick_id') == _coupon_id:
+                    _options = _coupon_market_options()
+                    _chosen = st.selectbox('Kupon üçün bazar/seçim', _options, key=f"coupon_market_{_coupon_id}")
+                    if st.button('✅ Seçimi təsdiqlə və kupona əlavə et', key=f"coupon_add_{_coupon_id}", type='primary', use_container_width=True):
+                        _coupon = st.session_state.setdefault('football_coupon', [])
+                        if not any(x.get('match_id') == _coupon_id and x.get('Seçim') == _chosen for x in _coupon):
+                            _coupon.append({'id': _coupon_id + '|' + _chosen, 'match_id': _coupon_id, 'Tarix': item.get('Tarix', '') , 'Saat': item.get('Saat', ''),
+                                            'Ev sahibi': item.get('Ev sahibi', ''), 'Qonaq': item.get('Qonaq', ''),
+                                            'Çempionat': item.get('Çempionat', ''), 'Seçim': _chosen})
+                        st.session_state.pop('coupon_pick_id', None)
+                        st.success('Seçim kupona əlavə edildi.')
+                        st.rerun()
             left, right = st.columns(2)
             for col, name, key in ((left, item['Ev sahibi'], '_hh'), (right, item['Qonaq'], '_ah')):
                 with col:
