@@ -241,9 +241,27 @@ div.st-key-analyze_button button {
   min-height: 52px !important; width: auto !important; min-width: 220px !important;
   white-space: nowrap !important; border-radius: 15px !important;
 }
+/* Kupon düyməsi analiz düyməsinin solunda üzən vəziyyətdə qalır. */
+div.st-key-coupon_float_button {
+  position: fixed !important; left: calc(50% - 205px) !important; right: auto !important;
+  bottom: 22px !important; z-index: 100000 !important; width: auto !important;
+  margin: 0 !important; padding: 0 !important; filter: drop-shadow(0 6px 18px rgba(0,0,0,.22));
+}
+div.st-key-coupon_float_button button { min-height: 52px !important; border-radius: 15px !important; white-space: nowrap !important; }
+div.st-key-coupon_float_panel {
+  position: fixed !important; left: 12px !important; bottom: 84px !important;
+  z-index: 100001 !important; width: min(420px, calc(100vw - 24px)) !important;
+  max-height: 65vh !important; overflow-y: auto !important;
+  padding: 12px !important; border: 1px solid rgba(128,128,128,.4) !important;
+  border-radius: 16px !important; background: var(--background-color, white) !important;
+  box-shadow: 0 10px 35px rgba(0,0,0,.28) !important;
+}
 @media (max-width: 600px) {
-  div.st-key-analyze_button { left: 50% !important; right: auto !important; bottom: 12px !important; transform: translateX(-50%) !important; max-width: calc(100vw - 24px) !important; }
+  div.st-key-analyze_button { left: auto !important; right: 12px !important; bottom: 12px !important; transform: none !important; max-width: calc(100vw - 150px) !important; }
   div.st-key-analyze_button button { min-width: 0 !important; width: 100% !important; }
+  div.st-key-coupon_float_button { left: 12px !important; bottom: 12px !important; }
+  div.st-key-coupon_float_button button { min-width: 0 !important; max-width: 135px !important; font-size: 12px !important; }
+  div.st-key-coupon_float_panel { left: 8px !important; bottom: 74px !important; width: calc(100vw - 16px) !important; max-height: 65vh !important; }
 }
 button[kind="primary"]:hover { filter: brightness(1.06); }
 div[data-testid="stExpander"] { border-radius: 14px; border: 1px solid rgba(128,128,128,.28); margin-bottom: 8px; }
@@ -2098,6 +2116,30 @@ def hist_cards_html(records):
     return ''.join(parts)
 
 
+# Kupon faylda saxlanılır ki, səhifə yenilənəndə və tətbiq yenidən açılanda itməsin.
+COUPON_FILE = ROOT / "football_coupon.json"
+
+def _load_coupon_file():
+    try:
+        if COUPON_FILE.exists():
+            data = json.loads(COUPON_FILE.read_text(encoding="utf-8"))
+            return data if isinstance(data, list) else []
+    except Exception:
+        pass
+    return []
+
+def _save_coupon_file():
+    try:
+        COUPON_FILE.write_text(json.dumps(st.session_state.get("football_coupon", []), ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception as exc:
+        st.warning(f"Kupon fayla yazıla bilmədi: {exc}")
+        return False
+
+# İlk açılışda kuponu diskdən bərpa et.
+if "football_coupon" not in st.session_state:
+    st.session_state["football_coupon"] = _load_coupon_file()
+
 def _coupon_market_options():
     """Seçim üçün əsas futbol bazarları və hazırkı filtrdəki bazarlar."""
     opts = [
@@ -2145,9 +2187,11 @@ def _render_coupon():
         with c2:
             if st.button('✖', key=f'coupon_remove_{leg.get("id", i)}', help='Kupondan sil'):
                 st.session_state['football_coupon'] = [x for j, x in enumerate(coupon) if j != i]
+                _save_coupon_file()
                 st.rerun()
     if st.button('🗑️ Kuponu təmizlə', key='coupon_clear', use_container_width=True):
         st.session_state['football_coupon'] = []
+        _save_coupon_file()
         st.rerun()
 
 
@@ -2187,8 +2231,6 @@ def render_analysis(A, cur_key):
         f'</div>', unsafe_allow_html=True)
     st.caption('Komandaların əvvəlki oyunları liqa və kubok daxil olmaqla bütün mövcud nəticələrdən, hədəf oyunun tarixindən əvvəl axtarılır. '
                f'Saatlar Bakı vaxtı ilədir. ⏱ {A.get("secs", 0):.1f} san.')
-    with st.expander('🎟️ Kupon bölməsi', expanded=bool(st.session_state.get('football_coupon'))):
-        _render_coupon()
     if A.get('filters'):
         _used_filters = ' + '.join(A['filters'])
         _auto_base = f"Son {A['n_games']} oyun — {_used_filters}"
@@ -2275,6 +2317,7 @@ def render_analysis(A, cur_key):
                             _coupon.append({'id': _coupon_id + '|' + _chosen, 'match_id': _coupon_id, 'Tarix': item.get('Tarix', '') , 'Saat': item.get('Saat', ''),
                                             'Ev sahibi': item.get('Ev sahibi', ''), 'Qonaq': item.get('Qonaq', ''),
                                             'Çempionat': item.get('Çempionat', ''), 'Seçim': _chosen})
+                            _save_coupon_file()
                         st.session_state.pop('coupon_pick_id', None)
                         st.success('Seçim kupona əlavə edildi.')
                         st.rerun()
@@ -2314,6 +2357,24 @@ def render_analysis(A, cur_key):
         st.download_button('⬇️ Nəticələri CSV kimi yüklə', out.to_csv(index=False, sep=';').encode('utf-8-sig'),
                            file_name='futbol_filtri_neticeleri.csv', mime='text/csv')
 
+
+# Üzən kupon paneli və analiz düyməsi: kupon solda, analiz sağda.
+with st.container(key="coupon_float_button"):
+    _coupon_count = len(st.session_state.get("football_coupon", []))
+    _coupon_label = f"🎟️ Kuponlar ({_coupon_count})"
+    if st.button(_coupon_label, key="coupon_float_toggle", use_container_width=True):
+        st.session_state["show_coupon_float"] = not st.session_state.get("show_coupon_float", False)
+
+if st.session_state.get("show_coupon_float", False):
+    with st.container(key="coupon_float_panel"):
+        _p1, _p2 = st.columns([4, 1])
+        with _p1:
+            st.markdown("### 🎟️ Kuponlar")
+        with _p2:
+            if st.button("✖", key="coupon_float_close", help="Paneli bağla"):
+                st.session_state["show_coupon_float"] = False
+                st.rerun()
+        _render_coupon()
 
 run_clicked = st.button('🔎 Oyunları analiz et', type='primary', key='analyze_button')
 cur_key = (tuple(n for n, _ in active_conditions()) if criteria_selected else (), int(n_games), str(date_from), str(date_to),
