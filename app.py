@@ -247,21 +247,31 @@ div.st-key-coupon_float_button {
   bottom: 22px !important; z-index: 100000 !important; width: auto !important;
   margin: 0 !important; padding: 0 !important; filter: drop-shadow(0 6px 18px rgba(0,0,0,.22));
 }
-div.st-key-coupon_float_button button { min-height: 52px !important; border-radius: 15px !important; white-space: nowrap !important; }
+div.st-key-coupon_float_button button {
+  min-height: 52px !important; border-radius: 15px !important; white-space: nowrap !important;
+  background: #1f2937 !important; color: #f9fafb !important; border: 1.5px solid #16a34a !important; font-weight: 700 !important;
+}
+div.st-key-coupon_float_button button p, div.st-key-coupon_float_button button span { color: #f9fafb !important; }
+div.st-key-analyze_button button, div.st-key-analyze_button button p { color: #fff !important; }
 div.st-key-coupon_float_panel {
   position: fixed !important; left: 12px !important; bottom: 84px !important;
   z-index: 100001 !important; width: min(420px, calc(100vw - 24px)) !important;
   max-height: 65vh !important; overflow-y: auto !important;
   padding: 12px !important; border: 1px solid rgba(128,128,128,.4) !important;
-  border-radius: 16px !important; background: var(--background-color, white) !important;
-  box-shadow: 0 10px 35px rgba(0,0,0,.28) !important;
+  border-radius: 16px !important; background: #111827 !important; color: #f9fafb !important;
+  box-shadow: 0 10px 35px rgba(0,0,0,.45) !important;
 }
+div.st-key-coupon_float_panel *:not(button):not(button *) { color: #f9fafb !important; }
+div.st-key-coupon_float_panel [data-testid="stCaptionContainer"], div.st-key-coupon_float_panel [data-testid="stCaptionContainer"] * { color: #9ca3af !important; }
+div.st-key-coupon_float_panel button { background: #1f2937 !important; color: #f9fafb !important; border: 1px solid rgba(255,255,255,.18) !important; }
+div.st-key-coupon_float_panel button p { color: #f9fafb !important; }
 @media (max-width: 600px) {
-  div.st-key-analyze_button { left: auto !important; right: 12px !important; bottom: 12px !important; transform: none !important; max-width: calc(100vw - 150px) !important; }
-  div.st-key-analyze_button button { min-width: 0 !important; width: 100% !important; }
-  div.st-key-coupon_float_button { left: 12px !important; bottom: 12px !important; }
-  div.st-key-coupon_float_button button { min-width: 0 !important; max-width: 135px !important; font-size: 12px !important; }
-  div.st-key-coupon_float_panel { left: 8px !important; bottom: 74px !important; width: calc(100vw - 16px) !important; max-height: 65vh !important; }
+  /* Mobil: iki düymə eyni sətirdə, bir-birinə girmir; Streamlit "Manage app" nişanının üstündə. */
+  div.st-key-coupon_float_button { left: 10px !important; right: auto !important; bottom: 58px !important; width: 148px !important; }
+  div.st-key-coupon_float_button button { width: 100% !important; min-width: 0 !important; padding: 0 8px !important; font-size: 13px !important; }
+  div.st-key-analyze_button { left: 166px !important; right: 10px !important; bottom: 58px !important; transform: none !important; width: auto !important; max-width: none !important; }
+  div.st-key-analyze_button button { width: 100% !important; min-width: 0 !important; padding: 0 8px !important; font-size: 13px !important; }
+  div.st-key-coupon_float_panel { left: 8px !important; bottom: 120px !important; width: calc(100vw - 16px) !important; max-height: 60vh !important; }
 }
 button[kind="primary"]:hover { filter: brightness(1.06); }
 div[data-testid="stExpander"] { border-radius: 14px; border: 1px solid rgba(128,128,128,.28); margin-bottom: 8px; }
