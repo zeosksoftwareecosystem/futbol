@@ -1354,7 +1354,8 @@ def _scheduler_start(_state):
 
 _scheduler_start(_refresh_state())
 _rs0 = _refresh_state()
-with st.expander('📚 Məlumat bazası — yenilə', expanded=(_rs0['running'] or _rs0['msgs'] is not None or 'refresh_msgs' in st.session_state)):
+with st.container(border=True):
+    st.markdown('**📚 Məlumat bazası**')
     if _rs0['msgs'] is not None and not _rs0['running']:
         st.session_state['refresh_msgs'] = _rs0['msgs']
         _rs0['msgs'] = None
@@ -1411,8 +1412,12 @@ def _apply_named_filter(name):
 
 # Yadda saxlanılan filtrlər ana səhifədə siyahı kimi görünür.
 _named_filters = _read_named_filters()
-if _named_filters:
-    with st.expander(f'📌 Yadda saxlanılan filtrlər ({len(_named_filters)})', expanded=False):
+_SHOW_SAVED_FILTERS = True
+if _SHOW_SAVED_FILTERS:
+    with st.container(border=True):
+        st.markdown('**📌 Yadda saxlanılan filtrlər**')
+        if not _named_filters:
+            st.caption('Hələ saxlanmış filtr yoxdur. Analiz etdikdən sonra "💾 Bu filtri yadda saxla" düyməsi ilə saxlaya bilərsən.')
         for _idx, (_preset_name, _preset_data) in enumerate(list(_named_filters.items())):
             _preset_data = _preset_data if isinstance(_preset_data, dict) else {}
             _meta_filters = _preset_data.get('_meta_filters', [])
@@ -1439,6 +1444,26 @@ if _named_filters:
                 except Exception as e:
                     st.error(f'Filtri silmək olmadı: {e}')
                 st.rerun()
+        _bk1, _bk2 = st.columns(2)
+        if _named_filters:
+            _bk1.download_button('⬇️ Filtrləri fayla yüklə (ehtiyat nüsxə)', json.dumps(_named_filters, ensure_ascii=False, indent=2).encode('utf-8'),
+                                 'named_filters.json', 'application/json', key='nf_download', use_container_width=True)
+        _up = _bk2.file_uploader('Filtrləri geri yüklə (named_filters.json)', type='json', key='nf_upload')
+        if _up is not None and st.session_state.get('_nf_up_sig') != (_up.name, _up.size):
+            try:
+                _new = json.loads(_up.getvalue().decode('utf-8'))
+                if not isinstance(_new, dict):
+                    raise ValueError('fayl düzgün formatda deyil')
+                _cur = _read_named_filters()
+                _cur.update(_new)
+                NAMED_FILTERS_FILE.write_text(json.dumps(_cur, ensure_ascii=False, indent=2), encoding='utf-8')
+                st.session_state['_nf_up_sig'] = (_up.name, _up.size)
+                st.session_state['_loaded_preset_msg'] = f'{len(_new)} filtr bərpa olundu.'
+                st.rerun()
+            except Exception as e:
+                st.error(f'Filtrləri bərpa etmək olmadı: {e}')
+        st.caption('⚠️ Tətbiq yenilənəndə (GitHub-a yeni app.py yükləyəndə) server fayllarını sıfırlayır və saxlanmış filtrlər silinir. '
+                   'Daimi qalması üçün "Filtrləri fayla yüklə" ilə faylı endirib GitHub-da app.py-ın yanına yüklə.')
 if st.session_state.get('_loaded_preset_msg'):
     st.info(st.session_state.pop('_loaded_preset_msg'))
 
