@@ -1382,7 +1382,7 @@ if fixtures.empty:
 NAMED_FILTERS_FILE = ROOT / 'named_filters.json'
 _PRESET_PREFIXES = ('match_', 'club_', 'min_', 'on_', 'mode_', 'corners_', 'shots_', 'target_')
 _PRESET_EXPLICIT = {'btts', 'btts_no', 'under25', 'ht05_under', 'ht15_under', 'ht_draw',
-                    'match_goal_25', 'match_goal_35', 'match_goal_45', 'club_goal_05',
+                    'match_goal_15', 'match_goal_25', 'match_goal_35', 'match_goal_45', 'club_goal_05',
                     'club_goal_15', 'club_goal_25', 'match_ht05', 'match_ht15',
                     'club_ht05', 'club_ht15', 'n_games', 'd_from', 'd_to'}
 
@@ -1592,6 +1592,7 @@ with st.container(border=True):
         btts = st.checkbox('BTTS — hər iki komanda qol vurub', key='btts')
         btts_no = st.checkbox('BTTS yox — ən azı bir komanda qol vurmayıb', key='btts_no')
         st.caption("Matç üzrə — hər iki komandanın qollarının cəmi")
+        match_goal_15 = st.checkbox('Matç 1.5 üst', key='match_goal_15')
         match_goal_25 = st.checkbox('Matç 2.5 üst', key='match_goal_25')
         under25 = st.checkbox('Matç 2.5 alt', key='under25')
         match_goal_35 = st.checkbox('Matç 3.5 üst', key='match_goal_35')
@@ -1632,7 +1633,7 @@ with st.container(border=True):
 
 criteria_selected = any([
     btts, btts_no, ht05_under, ht15_under, ht_draw, under25,
-    match_goal_25, match_goal_35, match_goal_45,
+    match_goal_15, match_goal_25, match_goal_35, match_goal_45,
     club_goal_05, club_goal_15, club_goal_25,
     match_ht05, match_ht15, club_ht05, club_ht15,
     corners_match_on, corners_club_on, shots_match_on, shots_club_on,
@@ -1703,6 +1704,7 @@ def active_conditions():
     if btts_no:
         conds.append(('BTTS yox', same(lambda d: (lambda hg, ag, has: (~((hg > 0) & (ag > 0)), has))(*ft(d)))))
     for on, label, mode, line in (
+        (match_goal_15, 'Matç 1.5 üst', 'Oyunda', 1.5),
         (match_goal_25, 'Matç 2.5 üst', 'Oyunda', 2.5),
         (match_goal_35, 'Matç 3.5 üst', 'Oyunda', 3.5),
         (match_goal_45, 'Matç 4.5 üst', 'Oyunda', 4.5),
@@ -2311,16 +2313,17 @@ def _ko_bg():
     return {'running': False, 'last': 0.0}
 
 
-def ko_bg_start():
-    """Fayllar yoxdursa (məs. tətbiq yenidən başlayıb) və ya fixtures köhnədirsə, özü arxa planda yükləyir. True = yüklənir."""
+def ko_bg_start(force=False):
+    """Fayllar yoxdursa (məs. tətbiq yenidən başlayıb) və ya fixtures köhnədirsə, özü arxa planda yükləyir. True = yüklənir.
+    force=True: düyməyə basılıb, bütün tarixçə yenidən yüklənir."""
     state = _ko_bg()
     if state['running']:
         return True
     KO_DIR.mkdir(exist_ok=True)
-    need_hist = not any(KO_DIR.glob('[0-9]*_*.csv'))
+    need_hist = force or not any(KO_DIR.glob('[0-9]*_*.csv'))
     fxp = KO_DIR / 'fixtures.csv'
     need_fx = (not fxp.exists()) or (_ko_time.time() - fxp.stat().st_mtime > 6 * 3600)
-    if not (need_hist or need_fx) or _ko_time.time() - state['last'] < 600:   # uğursuz olsa 10 dəqiqə gözlə
+    if not force and (not (need_hist or need_fx) or _ko_time.time() - state['last'] < 600):   # uğursuz olsa 10 dəqiqə gözlə
         return False
     state['last'], state['running'] = _ko_time.time(), True
 
@@ -2521,15 +2524,20 @@ def render_kofsent_section():
     st.caption('Kofsentləri seç (və ya əllə yaz) — proqram keçmişdə eyni kofsentli oyunları tapıb nəticələrini göstərir: '
                '1/X/2, üst/alt, ilk yarı, hər iki komanda qol vurur. Mənbə: football-data.co.uk (əsas Avropa liqaları). '
                'Keçmiş faiz gələcək nəticəyə zəmanət vermir.')
-    busy = ko_bg_start()
+    _clicked = st.button('🔄 Kofsent məlumatını yenilə', key='ko_dl',
+                         help='Yaxın oyunların siyahısı dərhal yenilənir, 8 mövsümlük tarixçə isə arxa planda yüklənir. Adətən lazım deyil, tətbiq özü yeniləyir.')
+    if _clicked:
+        _fx_ok = ko_fetch_fixtures()
+        _fxn = ko_load_fixtures()
+        if _fx_ok and not _fxn.empty:
+            st.success(f'Yaxın oyunlar siyahısı yeniləndi: {len(_fxn)} oyun, tarixləri {_fxn["date"].min():%d.%m.%Y} – {_fxn["date"].max():%d.%m.%Y}. '
+                       'Sayt hələ yeni oyunları qoymayıbsa, siyahı köhnə qalır.')
+        elif not _fx_ok:
+            st.warning('football-data.co.uk-dən yaxın oyunlar yüklənmədi (sayt cavab vermədi). Bir az sonra yenidən yoxla.')
+    busy = ko_bg_start(force=_clicked)
     if busy:
-        st.info('⏳ Kofsent məlumatı arxa planda yüklənir (ilk dəfə 2-5 dəqiqə çəkir). Bir azdan bura qayıdıb "Yoxla" düyməsinə bas.')
+        st.info('⏳ Kofsent tarixçəsi arxa planda yüklənir (2-5 dəqiqə). Səhifəni bağlaya bilərsən; bir azdan "Yoxla" düyməsinə bas.')
         st.button('🔄 Yoxla', key='ko_recheck')
-    if st.button('📥 Tarixçəni əllə yenidən yüklə', key='ko_dl', help='Adətən lazım deyil, tətbiq özü yükləyir.'):
-        with st.spinner('Yüklənir (bir neçə dəqiqə çəkə bilər)...'):
-            ok, tot, fx_ok = ko_refresh()
-        ko_load_history.clear()
-        st.success(f'{ok} / {tot} fayl yükləndi' + ('' if fx_ok else '. Bu günün oyunları (fixtures.csv) yüklənmədi.'))
     hist = ko_load_history(ko_sig())
     if hist.empty:
         if not busy:
