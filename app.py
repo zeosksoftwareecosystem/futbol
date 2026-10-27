@@ -1217,58 +1217,160 @@ if not st.session_state.get('_qp_restored'):
         pass
     st.session_state['_qp_restored'] = True
 
-with st.expander('📚 Məlumat bazası — yenilə', expanded=('refresh_msgs' in st.session_state)):
+# ---- Məlumat bazasının yenilənməsi: ARXA PLANDA işləyir, səhifə donmur ----
+import threading as _rf_threading
+import time as _rf_time
+
+
+LAST_REFRESH_FILE = ROOT / 'last_refresh.txt'
+AUTO_REFRESH_HOUR = 7   # Bakı vaxtı ilə hər səhər
+
+
+def _read_last_refresh():
+    try:
+        return pd.Timestamp(LAST_REFRESH_FILE.read_text(encoding='utf-8').strip())
+    except Exception:
+        return None
+
+
+@st.cache_resource
+def _refresh_state():
+    return {'running': False, 'started': 0.0, 'status': {}, 'msgs': None}
+
+
+def _j_om():
+    refresh_data()
+    return [('success', 'Open Matchday yeniləndi.')]
+
+
+def _j_fd():
+    ok, failed = refresh_fd()
+    m = [('success', f'football-data.co.uk: {ok} fayl yükləndi.')]
+    if failed:
+        m.append(('warning', f'Yüklənməyən fayllar ({len(failed)}): ' + ', '.join(failed[:15])))
+    return m
+
+
+def _j_fdx():
+    ok, failed = refresh_fdx()
+    m = [('success', f'football-data.co.uk (əlavə liqalar): {ok} fayl yükləndi.')]
+    if failed:
+        m.append(('warning', 'Yüklənməyən əlavə liqalar: ' + ', '.join(failed)))
+    return m
+
+
+def _j_ir():
+    refresh_ir()
+    return [('success', 'international_results (milli komandalar) yeniləndi.')]
+
+
+def _j_of():
+    ok, bad = refresh_of()
+    return [('success', f'openfootball: {ok} fayl yükləndi.' + (f' Xətalı: {bad}.' if bad else ''))]
+
+
+def _j_es():
+    n_res, n_fix, espn_failed, st_done, st_left = refresh_espn()
+    m = [('success', f'ESPN: {n_res} nəticə, {n_fix} qarşıdakı oyun. Künc/kart statistikası: {st_done} oyun yükləndi'
+          + (f', {st_left} oyun növbəti yeniləmədə davam edəcək.' if st_left > 0 else '.'))]
+    if espn_failed:
+        m.append(('warning', f'ESPN-də yüklənməyən yarışlar ({len(espn_failed)}): ' + ', '.join(espn_failed)))
+    return m
+
+
+_REFRESH_JOBS = [('Open Matchday', _j_om), ('football-data.co.uk', _j_fd), ('football-data.co.uk (əlavə liqalar)', _j_fdx),
+                 ('international_results', _j_ir), ('openfootball', _j_of), ('ESPN', _j_es)]
+
+
+def _refresh_start(state):
+    state['running'], state['started'], state['msgs'] = True, _rf_time.time(), None
+    state['status'] = {nm: 'gözləyir' for nm, _ in _REFRESH_JOBS}
+    results_ = {}
+
+    def worker(nm, fn):
+        state['status'][nm] = 'yüklənir…'
+        try:
+            results_[nm] = fn()
+            state['status'][nm] = 'hazırdır ✓'
+        except Exception as e:
+            results_[nm] = [('error', f'{nm} yenilənmədi: {e}')]
+            state['status'][nm] = 'xəta ✗'
+
+    def main():
+        try:
+            ts = [_rf_threading.Thread(target=worker, args=(nm, fn), daemon=True) for nm, fn in _REFRESH_JOBS]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+            msgs_ = []
+            for nm, _ in _REFRESH_JOBS:
+                msgs_.extend(results_.get(nm, []))
+            state['msgs'] = msgs_
+        finally:
+            state['running'] = False
+            try:
+                LAST_REFRESH_FILE.write_text(pd.Timestamp.now(tz='Asia/Baku').isoformat(), encoding='utf-8')
+            except Exception:
+                pass
+
+    _rf_threading.Thread(target=main, daemon=True).start()
+
+
+def _refresh_panel():
+    state = _refresh_state()
+    if state['running'] and _rf_time.time() - state['started'] > 900:   # 15 dəqiqədən çox donubsa — təzədən başlamağa icazə ver
+        state['running'] = False
+    if state['running']:
+        st.info('⏳ Yenilənir… səhifəni bağlasan da yükləmə serverdə davam edir.')
+        for nm, stt in list(state['status'].items()):
+            st.write(f'• {nm}: {stt}')
+        st.caption(f'Keçən vaxt: {int(_rf_time.time() - state["started"])} san.')
+    elif state['msgs'] is not None:
+        st.rerun()   # bitdi — məlumatı yenidən yüklə və nəticə mesajlarını göstər
+    else:
+        if st.button('🔄 Məlumatı yenilə', use_container_width=True, key='refresh_btn'):
+            _refresh_start(state)
+            st.rerun()
+
+
+@st.cache_resource
+def _scheduler_start(_state):
+    """Hər gün Bakı vaxtı ilə 07:00-da avtomatik yeniləmə. Tətbiq yatıbsa, oyananda buraxılmış yeniləməni dərhal edir."""
+    def loop():
+        while True:
+            try:
+                now = pd.Timestamp.now(tz='Asia/Baku')
+                due = now.normalize() + pd.Timedelta(hours=AUTO_REFRESH_HOUR)
+                last = _read_last_refresh()
+                if now >= due and (last is None or last < due) and not _state['running']:
+                    _refresh_start(_state)
+            except Exception:
+                pass
+            _rf_time.sleep(60)
+    _rf_threading.Thread(target=loop, daemon=True).start()
+    return True
+
+
+_scheduler_start(_refresh_state())
+_rs0 = _refresh_state()
+with st.expander('📚 Məlumat bazası — yenilə', expanded=(_rs0['running'] or _rs0['msgs'] is not None or 'refresh_msgs' in st.session_state)):
+    if _rs0['msgs'] is not None and not _rs0['running']:
+        st.session_state['refresh_msgs'] = _rs0['msgs']
+        _rs0['msgs'] = None
     if 'refresh_msgs' in st.session_state:
         for kind, text in st.session_state.pop('refresh_msgs'):
             getattr(st, kind)(text)
-    if st.button('🔄 Məlumatı yenilə', use_container_width=True):
-        def _j_om():
-            refresh_data()
-            return [('success', 'Open Matchday yeniləndi.')]
-
-        def _j_fd():
-            ok, failed = refresh_fd()
-            m = [('success', f'football-data.co.uk: {ok} fayl yükləndi.')]
-            if failed:
-                m.append(('warning', f'Yüklənməyən fayllar ({len(failed)}): ' + ', '.join(failed[:15])))
-            return m
-
-        def _j_fdx():
-            ok, failed = refresh_fdx()
-            m = [('success', f'football-data.co.uk (əlavə liqalar): {ok} fayl yükləndi.')]
-            if failed:
-                m.append(('warning', 'Yüklənməyən əlavə liqalar: ' + ', '.join(failed)))
-            return m
-
-        def _j_ir():
-            refresh_ir()
-            return [('success', 'international_results (milli komandalar) yeniləndi.')]
-
-        def _j_of():
-            ok, bad = refresh_of()
-            return [('success', f'openfootball: {ok} fayl yükləndi.' + (f' Xətalı: {bad}.' if bad else ''))]
-
-        def _j_es():
-            n_res, n_fix, espn_failed, st_done, st_left = refresh_espn()
-            m = [('success', f'ESPN: {n_res} nəticə, {n_fix} qarşıdakı oyun. Künc/kart statistikası: {st_done} oyun yükləndi'
-                  + (f', {st_left} oyun növbəti yeniləmədə davam edəcək.' if st_left > 0 else '.'))]
-            if espn_failed:
-                m.append(('warning', f'ESPN-də yüklənməyən yarışlar ({len(espn_failed)}): ' + ', '.join(espn_failed)))
-            return m
-
-        _jobs = [('Open Matchday', _j_om), ('football-data.co.uk', _j_fd), ('football-data.co.uk (əlavə liqalar)', _j_fdx),
-                 ('international_results', _j_ir), ('openfootball', _j_of), ('ESPN', _j_es)]
-        msgs = []
-        with st.spinner('Məlumatlar yüklənir (mənbələr eyni anda yüklənir)...'):
-            with ThreadPoolExecutor(max_workers=len(_jobs)) as _ex:
-                _futs = [(nm, _ex.submit(fn)) for nm, fn in _jobs]
-                for nm, fu in _futs:
-                    try:
-                        msgs.extend(fu.result())
-                    except Exception as e:
-                        msgs.append(('error', f'{nm} yenilənmədi: {e}'))
-        st.session_state['refresh_msgs'] = msgs
-        st.rerun()
+    if hasattr(st, 'fragment'):
+        st.fragment(run_every=(2 if _rs0['running'] else None))(_refresh_panel)()
+    else:
+        _refresh_panel()
+        if _rs0['running']:
+            if st.button('↻ Statusa bax', use_container_width=True):
+                st.rerun()
+    _lr = _read_last_refresh()
+    st.caption(f'🕖 Avtomatik yeniləmə: hər gün {AUTO_REFRESH_HOUR:02d}:00 (Bakı). Sonuncu yeniləmə: '
+               + (_lr.strftime('%Y-%m-%d %H:%M') if _lr is not None else 'məlum deyil'))
     st.caption('Yeniləmə internet tələb edir. Əvvəl yüklənmiş məlumatlar internet olmadan da analiz edilə bilər.')
 
 fixtures, results, fd_only_teams = load_data()
