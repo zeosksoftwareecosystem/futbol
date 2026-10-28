@@ -1559,7 +1559,8 @@ def _pct_for(H, team_arr, day_arr, n):
 def _pct_games(d):
     d = pd.Timestamp(d).normalize()
     base = ['date', 'time', 'home', 'away', 'league', 'home_k', 'away_k']
-    extra = ['ft_home', 'ft_away', 'ht_home', 'ht_away']
+    extra = ['ft_home', 'ft_away', 'ht_home', 'ht_away', 'home_corners', 'away_corners',
+             'home_shots', 'away_shots', 'home_target', 'away_target']
     rs = results[results['date'].dt.normalize() == d]
     fx = fixtures[fixtures['date'].dt.normalize() == d]
     parts = []
@@ -1574,23 +1575,7 @@ def _pct_games(d):
     if not parts:
         return pd.DataFrame(columns=base + extra)
     g = pd.concat(parts, ignore_index=True).dropna(subset=['home', 'away', 'home_k', 'away_k'])
-    g = g.drop_duplicates(subset=['home_k', 'away_k'], keep='first').reset_index(drop=True)
-    # Hesab və 1-ci hissə: ana səhifədəki kimi ±1 gün aralığında eyni komandaların nəticə sətrindən tamamlanır.
-    rr = results[(results['date'] >= d - pd.Timedelta(days=1)) & (results['date'] <= d + pd.Timedelta(days=1))].copy()
-    if not rr.empty:
-        rr['_dd'] = (rr['date'].dt.normalize() - d).abs()
-        rr = rr.sort_values('_dd', kind='stable')
-        for ca, cb in (('ht_home', 'ht_away'), ('ft_home', 'ft_away')):
-            if ca not in rr.columns or cb not in rr.columns:
-                continue
-            lk = rr.dropna(subset=[ca, cb]).drop_duplicates(['home_k', 'away_k'])[['home_k', 'away_k', ca, cb]]
-            lk = lk.rename(columns={ca: ca + '_x', cb: cb + '_x'})
-            g = g.merge(lk, on=['home_k', 'away_k'], how='left')
-            miss = g[ca].isna() | g[cb].isna()
-            g.loc[miss, ca] = g.loc[miss, ca + '_x']
-            g.loc[miss, cb] = g.loc[miss, cb + '_x']
-            g = g.drop(columns=[ca + '_x', cb + '_x'])
-    return g
+    return g.drop_duplicates(subset=['home_k', 'away_k'], keep='first').reset_index(drop=True)
 
 
 def _pct_shift(days):
@@ -1607,18 +1592,23 @@ def _pct_add():
         lst.append(nm)
 
 
-def _pct_add_named(nm):
-    lst = st.session_state.setdefault('p_flt', [])
-    if nm not in lst:
-        lst.append(nm)
-
-
 def _pct_remove(nm):
     st.session_state['p_flt'] = [x for x in st.session_state.get('p_flt', []) if x != nm]
 
 
 def _pct_score(a, b):
     return [f'{int(x)}–{int(y)}' if pd.notna(x) and pd.notna(y) else '' for x, y in zip(a, b)]
+
+
+def _pct_stat_txt(a, b):
+    """Ev-Qonaq (cəm) formatı: 7-5 (12). Məlumat yoxdursa boş."""
+    return [f'{int(x)}-{int(y)} ({int(x) + int(y)})' if pd.notna(x) and pd.notna(y) else '' for x, y in zip(a, b)]
+
+
+# Filtr adı -> (sütun adı, ev sütunu, qonaq sütunu)
+_PCT_STAT_COLS = {'künc': ('Künc', 'home_corners', 'away_corners'),
+                  'dəqiq zərbə': ('Dəqiq zərbə', 'home_target', 'away_target'),
+                  'zərbə': ('Zərbə', 'home_shots', 'away_shots')}
 
 
 def render_pct_page():
@@ -1631,11 +1621,6 @@ def render_pct_page():
     .st-key-pct_addrow [data-testid="stColumn"]:nth-child(1), .st-key-pct_addrow [data-testid="column"]:nth-child(1), [class*="st-key-pct_fl_"] [data-testid="stColumn"]:nth-child(1), [class*="st-key-pct_fl_"] [data-testid="column"]:nth-child(1) { flex: 1 1 0 !important; }
     .st-key-pct_addrow [data-testid="stColumn"]:nth-child(2), .st-key-pct_addrow [data-testid="column"]:nth-child(2), [class*="st-key-pct_fl_"] [data-testid="stColumn"]:nth-child(2), [class*="st-key-pct_fl_"] [data-testid="column"]:nth-child(2) { flex: 0 0 3rem !important; }
     .st-key-pct_datenav button { min-height: 2.6rem; font-weight: 700; }
-    [class*="st-key-pct_thr_"] [data-testid="stHorizontalBlock"] { flex-direction: row !important; flex-wrap: nowrap !important; gap: .4rem !important; align-items: flex-end !important; }
-    [class*="st-key-pct_thr_"] [data-testid="stColumn"], [class*="st-key-pct_thr_"] [data-testid="column"] { min-width: 0 !important; width: auto !important; }
-    [class*="st-key-pct_thr_"] [data-testid="stColumn"]:nth-child(1), [class*="st-key-pct_thr_"] [data-testid="column"]:nth-child(1) { flex: 3 1 0 !important; }
-    [class*="st-key-pct_thr_"] [data-testid="stColumn"]:nth-child(2), [class*="st-key-pct_thr_"] [data-testid="column"]:nth-child(2) { flex: 2 1 0 !important; }
-    [class*="st-key-pct_thr_"] button { min-height: 2.5rem; font-size: .85rem; padding: 0 .3rem; white-space: nowrap; }
     </style>""", unsafe_allow_html=True)
     st.button('← Ana səhifə', key='pct_back', on_click=_close_pct)
     st.markdown('<div class="hero"><h1>📈 Günün oyunları — faiz</h1>'
@@ -1656,15 +1641,8 @@ def render_pct_page():
         n = st.number_input('Hər komandanın son neçə oyununa baxılsın?', min_value=1, max_value=100, value=10, step=1, key='p_n')
         with st.expander('Künc / zərbə hədləri', expanded=False):
             st.caption('Matç: iki komandanın cəmi. Klub: hər klubun öz göstəricisi.')
-            _vals = []
-            _have = st.session_state.get('p_flt', [])
-            for i, (nm, d) in enumerate(zip(_PCT_STAT, _PCT_DEF)):
-                with st.container(key=f'pct_thr_{i}'):
-                    t1, t2 = st.columns([3, 2])
-                    _vals.append(int(t1.number_input(nm, 0, 60, d, key=f'p_thr_{i}')))
-                    t2.button('➕ Filtr', key=f'p_thr_add_{i}', on_click=_pct_add_named, args=(nm,),
-                              disabled=nm in _have, use_container_width=True, help='Bu filtri hədd ilə birlikdə siyahıya əlavə et')
-            thr = tuple(_vals)
+            _tc = st.columns(2)
+            thr = tuple(int(_tc[i % 2].number_input(nm, 0, 60, d, key=f'p_thr_{i}')) for i, (nm, d) in enumerate(zip(_PCT_STAT, _PCT_DEF)))
         cat = _pct_catalog(thr)
         chosen = [x for x in st.session_state.get('p_flt', []) if x in cat]
         st.session_state['p_flt'] = chosen
@@ -1698,7 +1676,7 @@ def render_pct_page():
         show = pd.DataFrame({'Saat': tm, 'Liqa': g['league'], 'Ev sahibi': g['home'], 'Qonaq': g['away'],
                              '1-ci hissə': _pct_score(g['ht_home'], g['ht_away']),
                              'Hesab': _pct_score(g['ft_home'], g['ft_away'])}).sort_values('Saat')
-        st.dataframe(show, hide_index=True, use_container_width=True, height=min(560, 38 + 35 * len(show)))
+        st.dataframe(show, hide_index=True, use_container_width=True, height=40 + 35 * len(show))
         return
 
     H = _pct_history(results, tuple(chosen), thr, (len(results), str(results['date'].max())))
@@ -1714,11 +1692,23 @@ def render_pct_page():
         'Saat': tm, 'Ev sahibi': g['home'], 'Qonaq': g['away'],
         '1-ci hissə': _pct_score(g['ht_home'], g['ht_away']),
         'Hesab': _pct_score(g['ft_home'], g['ft_away']),
-        'Ev faizi': fmt(hh, hd, hp), 'Qonaq faizi': fmt(ah, ad, ap),
-        'Orta %': avg,
-        'Məlumat': np.where(complete, '✓ tam', '⚠️ kəsik'),
-        'Liqa': g['league'],
     })
+    # Seçilmiş künc / zərbə / dəqiq zərbə filtrləri üçün hesabdan sonra: Ev-Qonaq (cəm), məs. 7-5 (12)
+    _seen = set()
+    for _nm in chosen:
+        if _nm not in _PCT_STAT:
+            continue
+        _k = 'künc' if 'künc' in _nm else ('dəqiq zərbə' if 'dəqiq' in _nm else 'zərbə')
+        if _k in _seen:
+            continue
+        _seen.add(_k)
+        _col, _ch, _ca = _PCT_STAT_COLS[_k]
+        out[_col] = _pct_stat_txt(_pct_num(g, _ch), _pct_num(g, _ca))
+    out['Ev faizi'] = fmt(hh, hd, hp)
+    out['Qonaq faizi'] = fmt(ah, ad, ap)
+    out['Orta %'] = avg
+    out['Məlumat'] = np.where(complete, '✓ tam', '⚠️ kəsik')
+    out['Liqa'] = g['league'].values
     out['_tam'] = complete.astype(int)
     min_pct = st.slider('Minimum orta faiz', 0, 100, 0, step=5, key='p_min')
     if min_pct > 0:
@@ -1735,7 +1725,7 @@ def render_pct_page():
     if out.empty:
         st.info('Bu şərtlərə uyğun oyun yoxdur. Minimum faizi azalt.')
         return
-    st.dataframe(out, hide_index=True, use_container_width=True, height=min(720, 38 + 35 * len(out)),
+    st.dataframe(out, hide_index=True, use_container_width=True, height=40 + 35 * len(out),
                  column_config={'Orta %': st.column_config.NumberColumn('Orta %', format='%.0f%%')})
     st.caption('Ev / Qonaq faizi: komandanın son oyunlarında filtrlərin tutduğu say (məs. 8/10 = 80%). Filtr üçün statistikası olmayan oyunlar keçilir: baxılan oyunlar statistikası olan son N oyundur. '
                '"Klub" filtrində hər klubun öz göstəricisi yoxlanılır.')
