@@ -267,9 +267,9 @@ div.st-key-coupon_float_panel button { background: #1f2937 !important; color: #f
 div.st-key-coupon_float_panel button p { color: #f9fafb !important; }
 @media (max-width: 600px) {
   /* Mobil: iki düymə eyni sətirdə, bir-birinə girmir; Streamlit "Manage app" nişanının üstündə. */
-  div.st-key-coupon_float_button { left: 10px !important; right: auto !important; bottom: 58px !important; width: 148px !important; }
+  div.st-key-coupon_float_button { left: 10px !important; right: auto !important; bottom: 105px !important; width: 148px !important; }
   div.st-key-coupon_float_button button { width: 100% !important; min-width: 0 !important; padding: 0 8px !important; font-size: 13px !important; }
-  div.st-key-analyze_button { left: 166px !important; right: 10px !important; bottom: 58px !important; transform: none !important; width: auto !important; max-width: none !important; }
+  div.st-key-analyze_button { left: 166px !important; right: 10px !important; bottom: 105px !important; transform: none !important; width: auto !important; max-width: none !important; }
   div.st-key-analyze_button button { width: 100% !important; min-width: 0 !important; padding: 0 8px !important; font-size: 13px !important; }
   div.st-key-coupon_float_panel { left: 8px !important; bottom: 120px !important; width: calc(100vw - 16px) !important; max-height: 60vh !important; }
 }
@@ -326,7 +326,7 @@ section[data-testid="stSidebar"] .stButton button { border-radius: 10px; font-we
   div[data-testid="stExpander"] { border-radius: 11px !important; }
   div[data-testid="stCheckbox"] label p, div[data-testid="stRadio"] label p { font-size: .82rem !important; line-height: 1.3 !important; }
   div[data-testid="stNumberInput"] input, div[data-testid="stDateInput"] input, div[data-testid="stTextInput"] input { font-size: 16px !important; }
-  div.st-key-analyze_button { bottom: calc(12px + env(safe-area-inset-bottom)) !important; width: calc(100vw - 32px) !important; max-width: 360px !important; }
+  div.st-key-analyze_button { bottom: calc(105px + env(safe-area-inset-bottom)) !important; width: auto !important; max-width: none !important; }
   div.st-key-analyze_button button { width: 100% !important; min-height: 48px !important; font-size: 15px !important; border-radius: 13px !important; }
 }
 </style>
@@ -1584,12 +1584,21 @@ if _page == "📊 Günlük Faiz Analizi":
             "Ev klubu": f"{_hhits}/{_htotal} ({_hp:.0f}%)" if _hp is not None else "Məlumat çatmır",
             "Səfər klubu": f"{_ahits}/{_atotal} ({_ap:.0f}%)" if _ap is not None else "Məlumat çatmır",
             "Orta faiz": _avg,
+            "Nümunə sayı": int(_htotal + _atotal),
             "Filtr": _daily_market,
         })
     _daily_out = pd.DataFrame(_daily_rows)
     if not _daily_out.empty:
+        # Əvvəl daha çox tarixi oyunla hesablanmış qarşılaşmalar, sonra yüksək faiz.
+        # Məsələn, 10/10 göstəricisi olan komandanın oyunu 2/2 göstəricisindən öndə gəlir,
+        # faizlər bərabər olduqda isə daha yüksək faizli oyunlar üstün tutulur.
         _daily_out["_started"] = _daily_out["Saat"].map(lambda x: x == "—")
-        _daily_out = _daily_out.sort_values(["Orta faiz", "Saat"], ascending=[False, True], na_position="last", kind="stable")
+        _daily_out = _daily_out.sort_values(
+            ["Nümunə sayı", "Orta faiz", "Saat"],
+            ascending=[False, False, True],
+            na_position="last",
+            kind="stable",
+        )
         st.markdown(f"**{_daily_date:%d %B %Y} · {len(_daily_out)} oyun · Filtr: {_daily_market} · Son {_daily_n} oyun**")
         st.caption("Faiz hər klubun son oyunları üzrə hesablanır. Orta faiz ev və səfər klubunun faizlərinin ortasıdır; məlumatı çatmayan oyunlar sıralamanın sonunda qalır.")
         _show = _daily_out.copy()
