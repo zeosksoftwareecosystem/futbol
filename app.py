@@ -267,11 +267,11 @@ div.st-key-coupon_float_panel button { background: #1f2937 !important; color: #f
 div.st-key-coupon_float_panel button p { color: #f9fafb !important; }
 @media (max-width: 600px) {
   /* Mobil: iki düymə eyni sətirdə, bir-birinə girmir; Streamlit "Manage app" nişanının üstündə. */
-  div.st-key-coupon_float_button { left: 10px !important; right: auto !important; bottom: 105px !important; width: 148px !important; }
+  div.st-key-coupon_float_button { left: 10px !important; right: auto !important; bottom: 58px !important; width: 148px !important; }
   div.st-key-coupon_float_button button { width: 100% !important; min-width: 0 !important; padding: 0 8px !important; font-size: 13px !important; }
-  div.st-key-analyze_button { left: 166px !important; right: 10px !important; bottom: 105px !important; transform: none !important; width: auto !important; max-width: none !important; }
+  div.st-key-analyze_button { left: 166px !important; right: 10px !important; bottom: 58px !important; transform: none !important; width: auto !important; max-width: none !important; }
   div.st-key-analyze_button button { width: 100% !important; min-width: 0 !important; padding: 0 8px !important; font-size: 13px !important; }
-  div.st-key-coupon_float_panel { left: 8px !important; bottom: 170px !important; width: calc(100vw - 16px) !important; max-height: 60vh !important; }
+  div.st-key-coupon_float_panel { left: 8px !important; bottom: 120px !important; width: calc(100vw - 16px) !important; max-height: 60vh !important; }
 }
 button[kind="primary"]:hover { filter: brightness(1.06); }
 div[data-testid="stExpander"] { border-radius: 14px; border: 1px solid rgba(128,128,128,.28); margin-bottom: 8px; }
@@ -326,7 +326,7 @@ section[data-testid="stSidebar"] .stButton button { border-radius: 10px; font-we
   div[data-testid="stExpander"] { border-radius: 11px !important; }
   div[data-testid="stCheckbox"] label p, div[data-testid="stRadio"] label p { font-size: .82rem !important; line-height: 1.3 !important; }
   div[data-testid="stNumberInput"] input, div[data-testid="stDateInput"] input, div[data-testid="stTextInput"] input { font-size: 16px !important; }
-  div.st-key-analyze_button { bottom: calc(105px + env(safe-area-inset-bottom)) !important; }
+  div.st-key-analyze_button { bottom: calc(12px + env(safe-area-inset-bottom)) !important; width: calc(100vw - 32px) !important; max-width: 360px !important; }
   div.st-key-analyze_button button { width: 100% !important; min-height: 48px !important; font-size: 15px !important; border-radius: 13px !important; }
 }
 </style>
@@ -1381,12 +1381,8 @@ def _scheduler_start(_state):
 
 
 _scheduler_start(_refresh_state())
-if st.session_state.get('page') != 'pct':
-    if st.button('📈 Faiz səhifəsi — günün oyunları faizlə', key='pct_nav', use_container_width=True):
-        st.session_state['page'] = 'pct'
-        st.rerun()
 _rs0 = _refresh_state()
-with st.container(border=True, key='db_panel'):
+with st.container(border=True):
     st.markdown('**📚 Məlumat bazası**')
     if _rs0['msgs'] is not None and not _rs0['running']:
         st.session_state['refresh_msgs'] = _rs0['msgs']
@@ -1407,229 +1403,207 @@ with st.container(border=True, key='db_panel'):
     st.caption('Yeniləmə internet tələb edir. Əvvəl yüklənmiş məlumatlar internet olmadan da analiz edilə bilər.')
 
 fixtures, results, fd_only_teams = load_data()
+
+
+# ======================= GÜNLÜK FAİZ ANALİZİ (ayrıca səhifə) =======================
+# Naviqasiya: ana səhifənin mövcud analizini dəyişmədən ayrıca ikinci səhifə.
+st.sidebar.markdown("## 📍 Bölmələr")
+_page = st.sidebar.radio(
+    "Səhifə seç",
+    ["Əsas səhifə", "📊 Günlük Faiz Analizi"],
+    key="app_page",
+    label_visibility="collapsed",
+)
+
+if _page == "📊 Günlük Faiz Analizi":
+    st.title("📊 Günlük Faiz Analizi")
+    st.caption("Seçilmiş gündəki oyunları klubların əvvəlki oyunlarının statistik faizinə görə sıralayır.")
+    _today_daily = baku_today()
+    st.session_state.setdefault("daily_date", _today_daily)
+
+    _dl, _dc, _dr = st.columns([1, 4, 1])
+    if _dl.button("◀", key="daily_prev", use_container_width=True, help="Əvvəlki gün"):
+        st.session_state["daily_date"] -= timedelta(days=1)
+    if _dr.button("▶", key="daily_next", use_container_width=True, help="Növbəti gün"):
+        st.session_state["daily_date"] += timedelta(days=1)
+    _daily_date = _dc.date_input("Oyunların tarixi", key="daily_date", label_visibility="collapsed")
+    st.caption("Tarix və oyun saatları Bakı vaxtı ilə göstərilir.")
+
+    _daily_markets = {
+        "Matç 1.5 üst": ("goals_over", 1.5),
+        "Matç 2.5 üst": ("goals_over", 2.5),
+        "Matç 3.5 üst": ("goals_over", 3.5),
+        "Matç 4.5 üst": ("goals_over", 4.5),
+        "Matç 2.5 alt": ("goals_under", 2.5),
+        "BTTS — hər iki komanda qol vurur": ("btts", None),
+        "BTTS yox": ("btts_no", None),
+        "Klub 0.5 üst": ("team_goals", 0.5),
+        "Klub 1.5 üst": ("team_goals", 1.5),
+        "Klub 2.5 üst": ("team_goals", 2.5),
+        "1-ci hissə 0.5 üst": ("ht_over", 0.5),
+        "1-ci hissə 1.5 üst": ("ht_over", 1.5),
+        "1-ci hissə 1.5 alt": ("ht_under", 1.5),
+        "Matç üzrə künc minimumu": ("corners_match", None),
+        "Klub üzrə künc minimumu": ("corners_team", None),
+        "Matç üzrə zərbə minimumu": ("shots_match", None),
+        "Klub üzrə zərbə minimumu": ("shots_team", None),
+        "Matç üzrə dəqiq zərbə minimumu": ("target_match", None),
+        "Klub üzrə dəqiq zərbə minimumu": ("target_team", None),
+    }
+    _d1, _d2 = st.columns([3, 1])
+    _daily_market = _d1.selectbox("Faiz filtri", list(_daily_markets), index=1, key="daily_market")
+    _daily_n = _d2.selectbox("Hər klubun son oyun sayı", [5, 10, 15, 20, 25, 30], index=1, key="daily_n")
+    _daily_kind, _daily_line = _daily_markets[_daily_market]
+    if _daily_kind in ("corners_match", "corners_team", "shots_match", "shots_team", "target_match", "target_team"):
+        _daily_threshold = st.number_input(
+            "Minimum göstərici",
+            min_value=0, max_value=60,
+            value=9 if "corners" in _daily_kind and "match" in _daily_kind else
+                  4 if "corners" in _daily_kind else
+                  22 if "shots_match" == _daily_kind else
+                  11 if "shots_team" == _daily_kind else
+                  8 if "target_match" == _daily_kind else 4,
+            step=1, key="daily_threshold"
+        )
+    else:
+        _daily_threshold = None
+
+    def _daily_eval(_hist, _team_key):
+        """Komandanın əvvəlki oyunlarında seçilmiş bazarın neçə dəfə baş verdiyini sayır."""
+        if _hist.empty:
+            return None, 0, 0
+        _h = _hist.copy()
+        _is_home = _h["home_k"].astype(str).eq(str(_team_key))
+        _is_away = _h["away_k"].astype(str).eq(str(_team_key))
+        _own_goals = pd.Series(np.nan, index=_h.index, dtype=float)
+        _own_goals.loc[_is_home] = pd.to_numeric(_h.loc[_is_home, "ft_home"], errors="coerce")
+        _own_goals.loc[_is_away] = pd.to_numeric(_h.loc[_is_away, "ft_away"], errors="coerce")
+        _hg = pd.to_numeric(_h.get("ft_home"), errors="coerce")
+        _ag = pd.to_numeric(_h.get("ft_away"), errors="coerce")
+        _valid = pd.Series(False, index=_h.index)
+        if _daily_kind == "goals_over":
+            _valid = _hg.notna() & _ag.notna()
+            _hit = (_hg + _ag) > float(_daily_line)
+        elif _daily_kind == "goals_under":
+            _valid = _hg.notna() & _ag.notna()
+            _hit = (_hg + _ag) < float(_daily_line)
+        elif _daily_kind in ("btts", "btts_no"):
+            _valid = _hg.notna() & _ag.notna()
+            _both = (_hg > 0) & (_ag > 0)
+            _hit = _both if _daily_kind == "btts" else ~_both
+        elif _daily_kind == "team_goals":
+            _valid = _own_goals.notna()
+            _hit = _own_goals > float(_daily_line)
+        elif _daily_kind in ("ht_over", "ht_under"):
+            _hh = pd.to_numeric(_h.get("ht_home"), errors="coerce")
+            _ha = pd.to_numeric(_h.get("ht_away"), errors="coerce")
+            _valid = _hh.notna() & _ha.notna()
+            _total_ht = _hh + _ha
+            _hit = _total_ht > float(_daily_line) if _daily_kind == "ht_over" else _total_ht < float(_daily_line)
+        else:
+            _pairs = {
+                "corners_match": ("home_corners", "away_corners", "match"),
+                "corners_team": ("home_corners", "away_corners", "team"),
+                "shots_match": ("home_shots", "away_shots", "match"),
+                "shots_team": ("home_shots", "away_shots", "team"),
+                "target_match": ("home_target", "away_target", "match"),
+                "target_team": ("home_target", "away_target", "team"),
+            }
+            _ch, _ca, _mode = _pairs[_daily_kind]
+            _x = pd.to_numeric(_h.get(_ch), errors="coerce")
+            _y = pd.to_numeric(_h.get(_ca), errors="coerce")
+            _valid = _x.notna() & _y.notna()
+            if _mode == "match":
+                _hit = (_x + _y) >= float(_daily_threshold)
+            else:
+                _own_stat = pd.Series(np.nan, index=_h.index, dtype=float)
+                _own_stat.loc[_is_home] = _x.loc[_is_home]
+                _own_stat.loc[_is_away] = _y.loc[_is_away]
+                _valid = _own_stat.notna()
+                _hit = _own_stat >= float(_daily_threshold)
+        _valid = _valid.fillna(False)
+        _hit = pd.Series(_hit, index=_h.index).fillna(False)
+        # Əvvəlcə son N faktiki oyunu seç; statistikası olmayan oyunları köhnə oyunlarla əvəz etmə.
+        _window = _h.tail(int(_daily_n))
+        _valid_hist = _window[_valid.loc[_window.index]]
+        if _valid_hist.empty:
+            return None, 0, 0
+        _valid_idx = _valid_hist.index
+        _hits = int(_hit.loc[_valid_idx].sum())
+        return 100.0 * _hits / len(_valid_hist), _hits, len(_valid_hist)
+
+    # Seçilən tarixdə nəticələr və təqvimdəki oyunları birləşdir, təkrarları çıxar.
+    _daily_frames = []
+    for _source_df in (results, fixtures):
+        if not _source_df.empty and "date" in _source_df.columns:
+            _tmp = _source_df[_source_df["date"].dt.date == _daily_date].copy()
+            if not _tmp.empty:
+                _daily_frames.append(_tmp)
+    if not _daily_frames:
+        st.info("Bu tarix üçün oyun tapılmadı. Məlumat bazasını yenilə və ya başqa tarix seç.")
+        st.stop()
+
+    _daily_games = pd.concat(_daily_frames, ignore_index=True, sort=False)
+    for _col in ("time", "league", "home", "away", "home_k", "away_k"):
+        if _col not in _daily_games.columns:
+            _daily_games[_col] = ""
+    _daily_games["_priority"] = _daily_games.get("ft_home", pd.Series(np.nan, index=_daily_games.index)).notna().astype(int)
+    # Gələcək günlərdə təqvim, keçmiş günlərdə nəticə sətri üstün olsun.
+    if _daily_date >= _today_daily:
+        _daily_games["_priority"] = _daily_games["_priority"].map(lambda x: 1 - x)
+    _daily_games = (_daily_games.sort_values("_priority", ascending=False, kind="stable")
+                    .drop_duplicates(subset=["date", "home_k", "away_k"], keep="first")
+                    .drop(columns=["_priority"], errors="ignore"))
+    _daily_games["_sort_time"] = _daily_games["time"].astype(str).replace({"nan": "99:99", "": "99:99"})
+    _daily_games = _daily_games.sort_values(["_sort_time", "home"], kind="stable")
+
+    _daily_hist = results.copy()
+    if not _daily_hist.empty:
+        _daily_hist = _daily_hist.dropna(subset=["date", "home_k", "away_k"]).copy()
+        _daily_hist = _daily_hist[_daily_hist["date"].dt.date < _daily_date]
+        _daily_hist = _daily_hist.sort_values(["date", "time"] if "time" in _daily_hist.columns else ["date"], kind="stable")
+
+    _daily_rows = []
+    for _, _game in _daily_games.iterrows():
+        _hk, _ak = _game.get("home_k"), _game.get("away_k")
+        _home_hist = _daily_hist[(_daily_hist["home_k"] == _hk) | (_daily_hist["away_k"] == _hk)].tail(200)
+        _away_hist = _daily_hist[(_daily_hist["home_k"] == _ak) | (_daily_hist["away_k"] == _ak)].tail(200)
+        _hp, _hhits, _htotal = _daily_eval(_home_hist, _hk)
+        _ap, _ahits, _atotal = _daily_eval(_away_hist, _ak)
+        _parts = [x for x in (_hp, _ap) if x is not None]
+        _avg = sum(_parts) / len(_parts) if _parts else None
+        _time = str(_game.get("time", "")).strip()
+        if _time.lower() in ("nan", "nat", "none"):
+            _time = "—"
+        _daily_rows.append({
+            "Tarix": pd.to_datetime(_game["date"]).strftime("%d.%m.%Y"),
+            "Saat": _time,
+            "Liqa": _game.get("league", ""),
+            "Ev sahibi": _game.get("home", ""),
+            "Qonaq": _game.get("away", ""),
+            "Ev klubu": f"{_hhits}/{_htotal} ({_hp:.0f}%)" if _hp is not None else "Məlumat çatmır",
+            "Səfər klubu": f"{_ahits}/{_atotal} ({_ap:.0f}%)" if _ap is not None else "Məlumat çatmır",
+            "Orta faiz": _avg,
+            "Filtr": _daily_market,
+        })
+    _daily_out = pd.DataFrame(_daily_rows)
+    if not _daily_out.empty:
+        _daily_out["_started"] = _daily_out["Saat"].map(lambda x: x == "—")
+        _daily_out = _daily_out.sort_values(["Orta faiz", "Saat"], ascending=[False, True], na_position="last", kind="stable")
+        st.markdown(f"**{_daily_date:%d %B %Y} · {len(_daily_out)} oyun · Filtr: {_daily_market} · Son {_daily_n} oyun**")
+        st.caption("Faiz hər klubun son oyunları üzrə hesablanır. Orta faiz ev və səfər klubunun faizlərinin ortasıdır; məlumatı çatmayan oyunlar sıralamanın sonunda qalır.")
+        _show = _daily_out.copy()
+        _show["Orta faiz"] = _show["Orta faiz"].map(lambda x: f"{x:.1f}%" if pd.notna(x) else "Məlumat yoxdur")
+        st.dataframe(_show.drop(columns=["_started"], errors="ignore"), hide_index=True, use_container_width=True,
+                     height=min(700, 42 + 38 * len(_show)))
+        st.download_button("⬇️ Günlük siyahını CSV yüklə", _show.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"gunluk_faiz_{_daily_date:%Y-%m-%d}.csv", mime="text/csv")
+    st.stop()
+# ======================= GÜNLÜK FAİZ ANALİZİ (son) =======================
+
 if fixtures.empty:
     st.error('Oyun cədvəlləri tapılmadı. ZIP-i tam çıxartdığını yoxla və ya yuxarıdakı "Məlumatı yenilə" düyməsindən yenilə.')
     st.stop()
-
-# ======================= FAİZ SƏHİFƏSİ (2-ci səhifə) =======================
-# Seçilmiş günün oyunları: hər komandanın son N oyununda filtrin neçə dəfə tutduğu (8/10 = 80%).
-# Ən yüksək orta faizli oyun siyahının başında olur. Bu blok öz köməkçi funksiyalarını istifadə edir.
-_PCT_BASE = 100000
-
-
-def _pct_num(df, col):
-    return pd.to_numeric(df[col], errors='coerce') if col in df.columns else pd.Series(np.nan, index=df.index)
-
-
-def _pct_atleast(d, ch, ca, mode, thr):
-    a, b = _pct_num(d, ch), _pct_num(d, ca)
-    has = a.notna() & b.notna()
-    if mode == 'Klub':
-        return a >= thr, b >= thr, has
-    p = (a + b) >= thr
-    return p, p, has
-
-
-def _pct_catalog(cthr, sthr, tthr):
-    """Filtr adı -> funksiya. Funksiya (ev baxışı ödənir, qonaq baxışı ödənir, məlumat var) qaytarır."""
-    cat = {}
-
-    def ft(d):
-        hg, ag = _pct_num(d, 'ft_home'), _pct_num(d, 'ft_away')
-        return hg, ag, hg.notna() & ag.notna()
-
-    def ht(d):
-        a, b = _pct_num(d, 'ht_home'), _pct_num(d, 'ht_away')
-        return a, b, a.notna() & b.notna()
-
-    def same(fn):
-        def inner(d):
-            p, has = fn(d)
-            return p, p, has
-        return inner
-
-    for L in (1.5, 2.5, 3.5, 4.5):
-        cat[f'Matç {L} üst'] = (lambda thr: lambda d: _pct_atleast(d, 'ft_home', 'ft_away', 'Oyunda', thr))(int(L) + 1)
-    for L in (1.5, 2.5, 3.5):
-        cat[f'Matç {L} alt'] = (lambda lim: same(lambda d: (lambda hg, ag, has: (hg + ag <= lim, has))(*ft(d))))(int(L))
-    cat['BTTS (hər ikisi qol vurur)'] = same(lambda d: (lambda hg, ag, has: ((hg > 0) & (ag > 0), has))(*ft(d)))
-    cat['BTTS yox'] = same(lambda d: (lambda hg, ag, has: (~((hg > 0) & (ag > 0)), has))(*ft(d)))
-    for L in (0.5, 1.5, 2.5):
-        cat[f'Klub {L} üst'] = (lambda thr: lambda d: _pct_atleast(d, 'ft_home', 'ft_away', 'Klub', thr))(int(L) + 1)
-    for L in (0.5, 1.5):
-        cat[f'1-ci hissə {L} üst'] = (lambda thr: lambda d: _pct_atleast(d, 'ht_home', 'ht_away', 'Oyunda', thr))(int(L) + 1)
-    cat['1-ci hissə 0.5 alt (qol yoxdur)'] = same(lambda d: (lambda a, b, has: (a + b == 0, has))(*ht(d)))
-    cat['1-ci hissə 1.5 alt'] = same(lambda d: (lambda a, b, has: (a + b <= 1, has))(*ht(d)))
-    cat['1-ci hissə heç-heçə'] = same(lambda d: (lambda a, b, has: (a == b, has))(*ht(d)))
-    for L in (0.5, 1.5):
-        cat[f'Klub 1-ci hissə {L} üst'] = (lambda thr: lambda d: _pct_atleast(d, 'ht_home', 'ht_away', 'Klub', thr))(int(L) + 1)
-    cat[f'Matç künc ≥ {cthr}'] = lambda d: _pct_atleast(d, 'home_corners', 'away_corners', 'Oyunda', cthr)
-    cat[f'Matç zərbə ≥ {sthr}'] = lambda d: _pct_atleast(d, 'home_shots', 'away_shots', 'Oyunda', sthr)
-    cat[f'Matç dəqiq zərbə ≥ {tthr}'] = lambda d: _pct_atleast(d, 'home_target', 'away_target', 'Oyunda', tthr)
-    return cat
-
-
-@st.cache_data(show_spinner='Faizlər hesablanır...', max_entries=12)
-def _pct_history(_res, names, cthr, sthr, tthr, sig):
-    cat = _pct_catalog(cthr, sthr, tthr)
-    ok_h = pd.Series(True, index=_res.index)
-    ok_a = pd.Series(True, index=_res.index)
-    has_all = pd.Series(True, index=_res.index)
-    for nm in names:
-        p_h, p_a, hs = cat[nm](_res)
-        ok_h &= p_h.fillna(False)
-        ok_a &= p_a.fillna(False)
-        has_all &= hs
-    teams = np.concatenate([_res['home_k'].values, _res['away_k'].values])
-    codes, uniques = pd.factorize(teams)
-    day = pd.to_datetime(_res['date']).values.astype('datetime64[D]').astype('int64')
-    days = np.concatenate([day, day])
-    hit = np.concatenate([(ok_h & has_all).values, (ok_a & has_all).values]).astype(np.int64)
-    has = np.concatenate([has_all.values, has_all.values]).astype(np.int64)
-    key = codes.astype(np.int64) * _PCT_BASE + days
-    order = np.argsort(key, kind='stable')
-    return {'key': key[order], 'cs_hit': np.concatenate([[0], np.cumsum(hit[order])]),
-            'cs_has': np.concatenate([[0], np.cumsum(has[order])]),
-            'code_of': {t: i for i, t in enumerate(uniques)}}
-
-
-def _pct_for(H, team_arr, day_arr, n):
-    codes = np.fromiter((H['code_of'].get(t, -1) for t in team_arr), dtype=np.int64, count=len(team_arr))
-    hi = np.searchsorted(H['key'], codes * _PCT_BASE + day_arr, side='left')
-    lo = np.searchsorted(H['key'], codes * _PCT_BASE, side='left')
-    k = np.minimum(hi - lo, n)
-    start = hi - k
-    hits = H['cs_hit'][hi] - H['cs_hit'][start]
-    den = H['cs_has'][hi] - H['cs_has'][start]
-    den = np.where(codes < 0, 0, den)
-    pct = np.where(den > 0, hits / np.maximum(den, 1) * 100, np.nan)
-    return hits, den, pct
-
-
-def _pct_games(d):
-    d = pd.Timestamp(d).normalize()
-    base = ['date', 'time', 'home', 'away', 'league', 'home_k', 'away_k']
-    rs = results[results['date'].dt.normalize() == d]
-    fx = fixtures[fixtures['date'].dt.normalize() == d]
-    parts = []
-    for df in (rs, fx):
-        if df.empty:
-            continue
-        df = df.copy()
-        for c in base + ['ft_home', 'ft_away']:
-            if c not in df.columns:
-                df[c] = np.nan
-        parts.append(df[base + ['ft_home', 'ft_away']])
-    if not parts:
-        return pd.DataFrame(columns=base + ['ft_home', 'ft_away'])
-    g = pd.concat(parts, ignore_index=True).dropna(subset=['home', 'away', 'home_k', 'away_k'])
-    return g.drop_duplicates(subset=['home_k', 'away_k'], keep='first').reset_index(drop=True)
-
-
-def _pct_shift(days):
-    if days == 0:
-        st.session_state['p_date'] = baku_today()
-    else:
-        st.session_state['p_date'] = st.session_state['p_date'] + timedelta(days=days)
-
-
-def _pct_go(page):
-    st.session_state['page'] = page
-
-
-def render_pct_page():
-    st.markdown("""<style>
-    .st-key-db_panel { display: none !important; }
-    .st-key-pct_datenav [data-testid="stHorizontalBlock"] { flex-direction: row !important; flex-wrap: nowrap !important; gap: .4rem !important; align-items: center !important; }
-    .st-key-pct_datenav [data-testid="stColumn"], .st-key-pct_datenav [data-testid="column"] { min-width: 0 !important; width: auto !important; flex: 1 1 0 !important; }
-    .st-key-pct_datenav [data-testid="stColumn"]:nth-child(2), .st-key-pct_datenav [data-testid="column"]:nth-child(2) { flex: 4 1 0 !important; }
-    .st-key-pct_datenav button { min-height: 2.6rem; font-weight: 700; }
-    </style>""", unsafe_allow_html=True)
-    st.button('← Ana səhifə', key='pct_back', on_click=_pct_go, args=('main',))
-    st.markdown('<div class="hero"><h1>📈 Günün oyunları — faiz</h1>'
-                '<p>Filtr seç: hər komandanın son N oyununda filtrin neçə dəfə tutduğu faizlə göstərilir (məsələn 10 oyundan 8 → 80%). '
-                'Ən yüksək faizli oyun siyahının başındadır.</p></div>', unsafe_allow_html=True)
-    st.session_state.setdefault('p_date', baku_today())
-    with st.container(border=True):
-        with st.container(key='pct_datenav'):
-            c1, c2, c3 = st.columns([1, 4, 1])
-            c1.button('◀', key='p_prev', on_click=_pct_shift, args=(-1,), use_container_width=True, help='Əvvəlki gün')
-            c2.date_input('Tarix', key='p_date', label_visibility='collapsed')
-            c3.button('▶', key='p_next', on_click=_pct_shift, args=(1,), use_container_width=True, help='Növbəti gün')
-        st.button('📅 Bu gün', key='p_today', on_click=_pct_shift, args=(0,), use_container_width=True)
-        st.caption('🕒 Tarix və saatlar Bakı vaxtı ilədir (UTC+4).')
-
-    with st.container(border=True):
-        st.markdown('<div class="sec">Filtrlər</div>', unsafe_allow_html=True)
-        n = st.number_input('Hər komandanın son neçə oyununa baxılsın?', min_value=1, max_value=50, value=10, step=1, key='p_n')
-        with st.expander('Künc / zərbə hədləri', expanded=False):
-            k1, k2, k3 = st.columns(3)
-            cthr = k1.number_input('Matç künc ≥', 0, 30, 9, key='p_cthr')
-            sthr = k2.number_input('Matç zərbə ≥', 0, 60, 22, key='p_sthr')
-            tthr = k3.number_input('Matç dəqiq zərbə ≥', 0, 30, 8, key='p_tthr')
-        cat = _pct_catalog(int(cthr), int(sthr), int(tthr))
-        # hədd dəyişəndə köhnə adlar siyahıdan düşür
-        st.session_state['p_filters'] = [x for x in st.session_state.get('p_filters', []) if x in cat]
-        names = st.multiselect('Filtrlər (bir neçə seçsən hamısı eyni oyunda tutmalıdır)', list(cat), key='p_filters',
-                               placeholder='məs: Matç 2.5 üst')
-
-    g = _pct_games(st.session_state['p_date'])
-    if g.empty:
-        st.info('Bu tarixdə bazada oyun yoxdur. Başqa gün seç və ya əsas səhifədən məlumatı yenilə.')
-        return
-    leagues = sorted(g['league'].dropna().astype(str).unique())
-    with st.expander(f'🏆 Liqa seçimi ({len(leagues)} liqa, boş = hamısı)', expanded=False):
-        sel = st.multiselect('Liqalar', leagues, key='p_leagues')
-    if sel:
-        g = g[g['league'].astype(str).isin(sel)].reset_index(drop=True)
-
-    if not names:
-        st.caption(f'Bu gün {len(g)} oyun var. Faizi görmək üçün yuxarıdan ən azı bir filtr seç.')
-        show = pd.DataFrame({'Saat': g['time'].astype(str).replace({'nan': '', 'NaT': ''}), 'Liqa': g['league'],
-                             'Ev sahibi': g['home'], 'Qonaq': g['away']}).sort_values('Saat')
-        st.dataframe(show, hide_index=True, use_container_width=True, height=min(560, 38 + 35 * len(show)))
-        return
-
-    H = _pct_history(results, tuple(names), int(cthr), int(sthr), int(tthr),
-                     (len(results), str(results['date'].max())))
-    day = np.full(len(g), pd.Timestamp(st.session_state['p_date']).normalize().to_datetime64().astype('datetime64[D]').astype('int64'))
-    hh, hd, hp = _pct_for(H, g['home_k'].values, day, int(n))
-    ah, ad, ap = _pct_for(H, g['away_k'].values, day, int(n))
-    out = pd.DataFrame({
-        'Saat': g['time'].astype(str).replace({'nan': '', 'NaT': ''}),
-        'Liqa': g['league'], 'Ev sahibi': g['home'], 'Qonaq': g['away'],
-        'Ev': [f'{a}/{b}' if b else '—' for a, b in zip(hh, hd)], 'Ev %': hp,
-        'Qonaq ': [f'{a}/{b}' if b else '—' for a, b in zip(ah, ad)], 'Qonaq %': ap,
-        'Orta %': np.where(np.isnan(hp) | np.isnan(ap), np.nan, (hp + ap) / 2),
-        'Hesab': [f'{int(x)}–{int(y)}' if pd.notna(x) and pd.notna(y) else '' for x, y in zip(g['ft_home'], g['ft_away'])],
-    })
-    c1, c2 = st.columns(2)
-    min_pct = c1.slider('Minimum orta faiz', 0, 100, 0, step=5, key='p_min')
-    sort_by = c2.radio('Sıralama', ['Orta %', 'Zəif komandanın faizi'], horizontal=True, key='p_sort')
-    out['Zəif %'] = np.fmin(hp, ap)
-    ok = out['Orta %'].notna()
-    skipped = int((~ok).sum())
-    out = out[ok & (out['Orta %'] >= min_pct)]
-    out = out.sort_values('Orta %' if sort_by == 'Orta %' else 'Zəif %', ascending=False, kind='stable').drop(columns=['Zəif %'])
-    top = out['Orta %'].max() if len(out) else 0
-    st.markdown(f'**Seçilmiş filtr:** {" + ".join(names)} · **Son oyun sayı:** {int(n)} · **Siyahıda:** {len(out)} oyun'
-                + (f' · ən yüksək: **{top:.0f}%**' if len(out) else ''))
-    if skipped:
-        st.caption(f'{skipped} oyun siyahıda yoxdur: komandalardan birinin əvvəlki oyunu və ya lazımi statistikası bazada tapılmadı.')
-    if out.empty:
-        st.info('Bu şərtlərə uyğun oyun yoxdur. Minimum faizi azalt.')
-        return
-    pc = lambda t: st.column_config.ProgressColumn(t, min_value=0, max_value=100, format='%.0f%%')
-    st.dataframe(out, hide_index=True, use_container_width=True, height=min(720, 38 + 35 * len(out)),
-                 column_config={'Ev %': pc('Ev %'), 'Qonaq %': pc('Qonaq %'), 'Orta %': pc('Orta %'), 'Qonaq ': st.column_config.TextColumn('Qonaq')})
-    st.caption('Ev / Qonaq: komandanın son oyunlarında filtrin tutduğu say (məs. 8/10). Statistikası olmayan oyunlar məxrəcə daxil edilmir.')
-
-
-if st.session_state.get('page') == 'pct':
-    render_pct_page()
-    st.stop()
-# ======================= FAİZ SƏHİFƏSİ (son) =======================
-
 
 # ---- Adla saxlanılan filtr dəstləri ----
 NAMED_FILTERS_FILE = ROOT / 'named_filters.json'
