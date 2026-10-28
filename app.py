@@ -206,7 +206,7 @@ CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 html, body, [class*="css"], .stMarkdown, button, input { font-family: 'Inter', sans-serif; }
-.block-container { padding-top: .8rem; padding-bottom: 6rem; max-width: 1180px; }
+.block-container { padding-top: 3.6rem; padding-bottom: 6rem; max-width: 1180px; }
 .block-container [data-testid="stVerticalBlock"] { gap: .55rem; }
 div[data-testid="stExpander"] summary { padding: .35rem .75rem; }
 div[data-testid="stCaptionContainer"], .stCaption { line-height: 1.3; }
@@ -314,7 +314,7 @@ section[data-testid="stSidebar"] .stButton button { border-radius: 10px; font-we
 [class*="st-key-moderow"] [data-testid="stColumn"]:nth-child(2), [class*="st-key-moderow"] [data-testid="column"]:nth-child(2) { flex: 4 1 0 !important; }
 [class*="st-key-moderow"] [data-testid="stRadio"] label p { font-size: .8rem !important; }
 @media (max-width: 700px) {
-  .block-container { padding: .65rem .65rem 6.5rem !important; max-width: 100% !important; }
+  .block-container { padding: 3.4rem .65rem 6.5rem !important; max-width: 100% !important; }
   .hero { padding: 18px 16px !important; border-radius: 14px !important; margin-bottom: 12px !important; }
   .hero h1 { font-size: 21px !important; line-height: 1.25 !important; }
   .hero p { font-size: 13px !important; line-height: 1.45 !important; }
