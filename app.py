@@ -1574,7 +1574,23 @@ def _pct_games(d):
     if not parts:
         return pd.DataFrame(columns=base + extra)
     g = pd.concat(parts, ignore_index=True).dropna(subset=['home', 'away', 'home_k', 'away_k'])
-    return g.drop_duplicates(subset=['home_k', 'away_k'], keep='first').reset_index(drop=True)
+    g = g.drop_duplicates(subset=['home_k', 'away_k'], keep='first').reset_index(drop=True)
+    # Hesab və 1-ci hissə: ana səhifədəki kimi ±1 gün aralığında eyni komandaların nəticə sətrindən tamamlanır.
+    rr = results[(results['date'] >= d - pd.Timedelta(days=1)) & (results['date'] <= d + pd.Timedelta(days=1))].copy()
+    if not rr.empty:
+        rr['_dd'] = (rr['date'].dt.normalize() - d).abs()
+        rr = rr.sort_values('_dd', kind='stable')
+        for ca, cb in (('ht_home', 'ht_away'), ('ft_home', 'ft_away')):
+            if ca not in rr.columns or cb not in rr.columns:
+                continue
+            lk = rr.dropna(subset=[ca, cb]).drop_duplicates(['home_k', 'away_k'])[['home_k', 'away_k', ca, cb]]
+            lk = lk.rename(columns={ca: ca + '_x', cb: cb + '_x'})
+            g = g.merge(lk, on=['home_k', 'away_k'], how='left')
+            miss = g[ca].isna() | g[cb].isna()
+            g.loc[miss, ca] = g.loc[miss, ca + '_x']
+            g.loc[miss, cb] = g.loc[miss, cb + '_x']
+            g = g.drop(columns=[ca + '_x', cb + '_x'])
+    return g
 
 
 def _pct_shift(days):
@@ -1588,6 +1604,12 @@ def _pct_add():
     nm = st.session_state.get('p_add_sel')
     lst = st.session_state.setdefault('p_flt', [])
     if nm and nm not in lst:
+        lst.append(nm)
+
+
+def _pct_add_named(nm):
+    lst = st.session_state.setdefault('p_flt', [])
+    if nm not in lst:
         lst.append(nm)
 
 
@@ -1609,6 +1631,11 @@ def render_pct_page():
     .st-key-pct_addrow [data-testid="stColumn"]:nth-child(1), .st-key-pct_addrow [data-testid="column"]:nth-child(1), [class*="st-key-pct_fl_"] [data-testid="stColumn"]:nth-child(1), [class*="st-key-pct_fl_"] [data-testid="column"]:nth-child(1) { flex: 1 1 0 !important; }
     .st-key-pct_addrow [data-testid="stColumn"]:nth-child(2), .st-key-pct_addrow [data-testid="column"]:nth-child(2), [class*="st-key-pct_fl_"] [data-testid="stColumn"]:nth-child(2), [class*="st-key-pct_fl_"] [data-testid="column"]:nth-child(2) { flex: 0 0 3rem !important; }
     .st-key-pct_datenav button { min-height: 2.6rem; font-weight: 700; }
+    [class*="st-key-pct_thr_"] [data-testid="stHorizontalBlock"] { flex-direction: row !important; flex-wrap: nowrap !important; gap: .4rem !important; align-items: flex-end !important; }
+    [class*="st-key-pct_thr_"] [data-testid="stColumn"], [class*="st-key-pct_thr_"] [data-testid="column"] { min-width: 0 !important; width: auto !important; }
+    [class*="st-key-pct_thr_"] [data-testid="stColumn"]:nth-child(1), [class*="st-key-pct_thr_"] [data-testid="column"]:nth-child(1) { flex: 3 1 0 !important; }
+    [class*="st-key-pct_thr_"] [data-testid="stColumn"]:nth-child(2), [class*="st-key-pct_thr_"] [data-testid="column"]:nth-child(2) { flex: 2 1 0 !important; }
+    [class*="st-key-pct_thr_"] button { min-height: 2.5rem; font-size: .85rem; padding: 0 .3rem; white-space: nowrap; }
     </style>""", unsafe_allow_html=True)
     st.button('← Ana səhifə', key='pct_back', on_click=_close_pct)
     st.markdown('<div class="hero"><h1>📈 Günün oyunları — faiz</h1>'
@@ -1629,8 +1656,15 @@ def render_pct_page():
         n = st.number_input('Hər komandanın son neçə oyununa baxılsın?', min_value=1, max_value=100, value=10, step=1, key='p_n')
         with st.expander('Künc / zərbə hədləri', expanded=False):
             st.caption('Matç: iki komandanın cəmi. Klub: hər klubun öz göstəricisi.')
-            _tc = st.columns(2)
-            thr = tuple(int(_tc[i % 2].number_input(nm, 0, 60, d, key=f'p_thr_{i}')) for i, (nm, d) in enumerate(zip(_PCT_STAT, _PCT_DEF)))
+            _vals = []
+            _have = st.session_state.get('p_flt', [])
+            for i, (nm, d) in enumerate(zip(_PCT_STAT, _PCT_DEF)):
+                with st.container(key=f'pct_thr_{i}'):
+                    t1, t2 = st.columns([3, 2])
+                    _vals.append(int(t1.number_input(nm, 0, 60, d, key=f'p_thr_{i}')))
+                    t2.button('➕ Filtr', key=f'p_thr_add_{i}', on_click=_pct_add_named, args=(nm,),
+                              disabled=nm in _have, use_container_width=True, help='Bu filtri hədd ilə birlikdə siyahıya əlavə et')
+            thr = tuple(_vals)
         cat = _pct_catalog(thr)
         chosen = [x for x in st.session_state.get('p_flt', []) if x in cat]
         st.session_state['p_flt'] = chosen
