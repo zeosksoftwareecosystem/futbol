@@ -1122,13 +1122,15 @@ def _espn_stats(slug, event_id):
     return out
 
 
-def refresh_espn():
+def refresh_espn(days_back=None):
+    """days_back verilsə (sürətli rejim): yalnız son N günün oyunları yenilənir, statistikası gəlməyən oyunun cəhd sayı artmır."""
+    quick = days_back is not None
     ESPN_DIR.mkdir(exist_ok=True)
     old_res_path = ESPN_DIR / 'results.csv'
     first = not old_res_path.exists()
     today_ = datetime.utcnow().date()
-    start = today_ - timedelta(days=ESPN_DAYS_BACK_FIRST if first else ESPN_DAYS_BACK)
-    end = today_ + timedelta(days=ESPN_DAYS_AHEAD)
+    start = today_ - timedelta(days=days_back if (quick and not first) else (ESPN_DAYS_BACK_FIRST if first else ESPN_DAYS_BACK))
+    end = today_ + timedelta(days=(2 if quick and not first else ESPN_DAYS_AHEAD))
     all_fix, all_res, failed = [], [], []
     with ThreadPoolExecutor(max_workers=8) as ex:
         futs = {slug: ex.submit(_espn_fetch_league, slug, name, start, end) for slug, name in ESPN_LEAGUES.items()}
@@ -1163,7 +1165,8 @@ def refresh_espn():
             with ThreadPoolExecutor(max_workers=16) as ex:
                 got = list(ex.map(lambda t: _espn_stats(t[0], t[1]), zip(pend['slug'], pend['id'])))
             for idx, st_ in zip(pend.index, got):
-                res_all.at[idx, 'stats_try'] += 1
+                if st_ or not quick:
+                    res_all.at[idx, 'stats_try'] += 1
                 if st_:
                     stats_done += 1
                     for k, v in st_.items():
@@ -1286,7 +1289,9 @@ import time as _rf_time
 
 
 LAST_REFRESH_FILE = ROOT / 'last_refresh.txt'
-AUTO_REFRESH_HOUR = 7   # Bakı vaxtı ilə hər səhər
+LAST_QUICK_FILE = ROOT / 'last_quick_refresh.txt'
+AUTO_REFRESH_HOUR = 7   # Bakı vaxtı ilə hər səhər: tam yeniləmə
+AUTO_QUICK_MINUTES = 30  # gün ərzində: yalnız ESPN (son 3 gün) + yeni bitmiş oyunların statistikası
 
 
 def _read_last_refresh():
@@ -1408,8 +1413,12 @@ def _scheduler_start(_state):
                 last = _read_last_refresh()
                 if now >= due and (last is None or last < due) and not _state['running']:
                     _refresh_start(_state)
+                elif not _state['running'] and _rf_time.time() - _state.get('quick_last', 0) >= AUTO_QUICK_MINUTES * 60:
+                    _state['quick_last'] = _rf_time.time()
+                    refresh_espn(days_back=3)
+                    LAST_QUICK_FILE.write_text(pd.Timestamp.now(tz='Asia/Baku').isoformat(), encoding='utf-8')
             except Exception:
-                pass
+                _state['quick_last'] = _rf_time.time()
             _rf_time.sleep(60)
     _rf_threading.Thread(target=loop, daemon=True).start()
     return True
@@ -1443,9 +1452,24 @@ with st.container(border=True, key='db_panel'):
             if st.button('↻ Statusa bax', use_container_width=True):
                 st.rerun()
     _lr = _read_last_refresh()
-    st.caption(f'🕖 Avtomatik yeniləmə: hər gün {AUTO_REFRESH_HOUR:02d}:00 (Bakı). Sonuncu yeniləmə: '
+    st.caption(f'🕖 Tam yeniləmə: hər gün {AUTO_REFRESH_HOUR:02d}:00 (Bakı), gün ərzində hər {AUTO_QUICK_MINUTES} dəq. sürətli (ESPN). Sonuncu tam yeniləmə: '
                + (_lr.strftime('%Y-%m-%d %H:%M') if _lr is not None else 'məlum deyil'))
     st.caption('Yeniləmə internet tələb edir. Əvvəl yüklənmiş məlumatlar internet olmadan da analiz edilə bilər.')
+    import os as _os
+    def _has_key(nm):
+        try:
+            v = st.secrets.get(nm, '')
+        except Exception:
+            v = ''
+        return bool(str(v or _os.environ.get(nm, '')).strip())
+    try:
+        _u = json.loads((ROOT / 'apif_cache.json').read_text(encoding='utf-8')).get('used', {})
+        _used = int(_u.get('n', 0)) if _u.get('day') == baku_today().isoformat() else 0
+    except Exception:
+        _used = 0
+    st.caption('🔌 Canlı mənbələr (faiz səhifəsində hesab, 1-ci hissə, statistika üçün; bazanın yenilənməsinə aid deyil): '
+               f"API-Football {'✓ açar var · bu gün ' + str(_used) + ' sorğu' if _has_key('APIFOOTBALL_KEY') else '✗ açar yoxdur'} · "
+               f"football-data.org {'✓ açar var' if _has_key('FOOTBALLDATA_KEY') else '✗ açar yoxdur'}")
 
 fixtures, results, fd_only_teams = load_data()
 
