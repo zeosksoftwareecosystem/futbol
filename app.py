@@ -1529,16 +1529,17 @@ def _pct_history(_res, names, thr, sig):
         ok_h &= p_h.fillna(False)
         ok_a &= p_a.fillna(False)
         has_all &= hs
-    teams = np.concatenate([_res['home_k'].values, _res['away_k'].values])
+    # Yalnız lazımi statistikası olan oyunlar sayılır: "son N oyun" = statistikası olan son N oyun.
+    m = has_all.values
+    hk, ak = _res['home_k'].values[m], _res['away_k'].values[m]
+    teams = np.concatenate([hk, ak])
     codes, uniques = pd.factorize(teams)
-    day = pd.to_datetime(_res['date']).values.astype('datetime64[D]').astype('int64')
+    day = pd.to_datetime(_res['date']).values.astype('datetime64[D]').astype('int64')[m]
     days = np.concatenate([day, day])
-    hit = np.concatenate([(ok_h & has_all).values, (ok_a & has_all).values]).astype(np.int64)
-    has = np.concatenate([has_all.values, has_all.values]).astype(np.int64)
+    hit = np.concatenate([ok_h.values[m], ok_a.values[m]]).astype(np.int64)
     key = codes.astype(np.int64) * _PCT_BASE + days
     order = np.argsort(key, kind='stable')
     return {'key': key[order], 'cs_hit': np.concatenate([[0], np.cumsum(hit[order])]),
-            'cs_has': np.concatenate([[0], np.cumsum(has[order])]),
             'code_of': {t: i for i, t in enumerate(uniques)}}
 
 
@@ -1550,8 +1551,7 @@ def _pct_for(H, team_arr, day_arr, n):
     k = np.minimum(hi - lo, n)
     start = hi - k
     hits = H['cs_hit'][hi] - H['cs_hit'][start]
-    den = H['cs_has'][hi] - H['cs_has'][start]
-    den = np.where(codes < 0, 0, den)
+    den = np.where(codes < 0, 0, k)
     pct = np.where(den > 0, hits / np.maximum(den, 1) * 100, np.nan)
     return hits, den, pct
 
@@ -1638,7 +1638,7 @@ def render_pct_page():
         if free:
             with st.container(key='pct_addrow'):
                 a1, a2 = st.columns([1, 1])
-                a1.selectbox('Filtr seç', free, key='p_add_sel', label_visibility='collapsed')
+                a1.selectbox('Filtr seç', free, key='p_add_sel', label_visibility='collapsed', format_func=lambda x: _pct_label(x, thr))
                 a2.button('➕', key='p_add_btn', on_click=_pct_add, use_container_width=True, help='Seçilmiş filtri əlavə et')
         if not chosen:
             st.caption('Siyahıdan filtr seç və ➕ düyməsinə bas. Bir neçə filtr əlavə etsən, hamısı eyni oyunda tutmalıdır.')
@@ -1697,13 +1697,13 @@ def render_pct_page():
     st.markdown(f'**Seçilmiş filtr:** {labels} · **Son oyun sayı:** {int(n)} · **Siyahıda:** {len(out)} oyun'
                 + (f' · ən yüksək: **{top:.0f}%**' if pd.notna(top) else ''))
     if len(out) > n_full:
-        st.caption(f'{len(out) - n_full} oyunun məlumatı kəsikdir (komandanın əvvəlki oyunu və ya statistikası çatmır). Onlar siyahının sonundadır.')
+        st.caption(f'{len(out) - n_full} oyunun məlumatı kəsikdir (komandanın statistikası olan əvvəlki oyunları N-dən azdır). Onlar siyahının sonundadır.')
     if out.empty:
         st.info('Bu şərtlərə uyğun oyun yoxdur. Minimum faizi azalt.')
         return
     st.dataframe(out, hide_index=True, use_container_width=True, height=min(720, 38 + 35 * len(out)),
                  column_config={'Orta %': st.column_config.NumberColumn('Orta %', format='%.0f%%')})
-    st.caption('Ev / Qonaq faizi: komandanın son oyunlarında filtrlərin tutduğu say (məs. 8/10 = 80%). Statistikası olmayan oyunlar məxrəcə daxil edilmir. '
+    st.caption('Ev / Qonaq faizi: komandanın son oyunlarında filtrlərin tutduğu say (məs. 8/10 = 80%). Filtr üçün statistikası olmayan oyunlar keçilir: baxılan oyunlar statistikası olan son N oyundur. '
                '"Klub" filtrində hər klubun öz göstəricisi yoxlanılır.')
     st.download_button('⬇️ Siyahını CSV yüklə', out.to_csv(index=False).encode('utf-8-sig'),
                        file_name=f"faiz_{st.session_state['p_date']:%Y-%m-%d}.csv", mime='text/csv', key='p_csv')
