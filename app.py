@@ -267,11 +267,11 @@ div.st-key-coupon_float_panel button { background: #1f2937 !important; color: #f
 div.st-key-coupon_float_panel button p { color: #f9fafb !important; }
 @media (max-width: 600px) {
   /* Mobil: iki düymə eyni sətirdə, bir-birinə girmir; Streamlit "Manage app" nişanının üstündə. */
-  div.st-key-coupon_float_button { left: 10px !important; right: auto !important; bottom: 58px !important; width: 148px !important; }
+  div.st-key-coupon_float_button { left: 10px !important; right: auto !important; bottom: 105px !important; width: 148px !important; }
   div.st-key-coupon_float_button button { width: 100% !important; min-width: 0 !important; padding: 0 8px !important; font-size: 13px !important; }
-  div.st-key-analyze_button { left: 166px !important; right: 10px !important; bottom: 58px !important; transform: none !important; width: auto !important; max-width: none !important; }
+  div.st-key-analyze_button { left: 166px !important; right: 10px !important; bottom: 105px !important; transform: none !important; width: auto !important; max-width: none !important; }
   div.st-key-analyze_button button { width: 100% !important; min-width: 0 !important; padding: 0 8px !important; font-size: 13px !important; }
-  div.st-key-coupon_float_panel { left: 8px !important; bottom: 120px !important; width: calc(100vw - 16px) !important; max-height: 60vh !important; }
+  div.st-key-coupon_float_panel { left: 8px !important; bottom: 170px !important; width: calc(100vw - 16px) !important; max-height: 60vh !important; }
 }
 button[kind="primary"]:hover { filter: brightness(1.06); }
 div[data-testid="stExpander"] { border-radius: 14px; border: 1px solid rgba(128,128,128,.28); margin-bottom: 8px; }
@@ -326,7 +326,7 @@ section[data-testid="stSidebar"] .stButton button { border-radius: 10px; font-we
   div[data-testid="stExpander"] { border-radius: 11px !important; }
   div[data-testid="stCheckbox"] label p, div[data-testid="stRadio"] label p { font-size: .82rem !important; line-height: 1.3 !important; }
   div[data-testid="stNumberInput"] input, div[data-testid="stDateInput"] input, div[data-testid="stTextInput"] input { font-size: 16px !important; }
-  div.st-key-analyze_button { bottom: calc(12px + env(safe-area-inset-bottom)) !important; width: calc(100vw - 32px) !important; max-width: 360px !important; }
+  div.st-key-analyze_button { bottom: calc(105px + env(safe-area-inset-bottom)) !important; }
   div.st-key-analyze_button button { width: 100% !important; min-height: 48px !important; font-size: 15px !important; border-radius: 13px !important; }
 }
 </style>
@@ -1381,6 +1381,10 @@ def _scheduler_start(_state):
 
 
 _scheduler_start(_refresh_state())
+if st.session_state.get('page') != 'pct':
+    if st.button('📈 Faiz səhifəsi — günün oyunları faizlə', key='pct_nav', use_container_width=True):
+        st.session_state['page'] = 'pct'
+        st.rerun()
 _rs0 = _refresh_state()
 with st.container(border=True, key='db_panel'):
     st.markdown('**📚 Məlumat bazası**')
@@ -2587,18 +2591,6 @@ def render_analysis(A, cur_key):
         st.download_button('⬇️ Nəticələri CSV kimi yüklə', out.to_csv(index=False, sep=';').encode('utf-8-sig'),
                            file_name='futbol_filtri_neticeleri.csv', mime='text/csv')
 
-
-# Faiz səhifəsinə keçid: ekranın sağ kənarında üzən düymə.
-st.markdown("""<style>
-div.st-key-pct_nav_button { position: fixed !important; right: 14px !important; left: auto !important; bottom: 22px !important;
-  z-index: 100000 !important; width: auto !important; margin: 0 !important; filter: drop-shadow(0 6px 18px rgba(0,0,0,.22)); }
-div.st-key-pct_nav_button button { min-height: 52px !important; border-radius: 15px !important; white-space: nowrap !important;
-  background: #1f2937 !important; color: #f9fafb !important; border: 1.5px solid #16a34a !important; font-weight: 700 !important; }
-div.st-key-pct_nav_button button p { color: #f9fafb !important; }
-@media (max-width: 600px) { div.st-key-pct_nav_button { right: 10px !important; bottom: 118px !important; } }
-</style>""", unsafe_allow_html=True)
-with st.container(key="pct_nav_button"):
-    st.button("📈 Faiz", key="pct_nav", on_click=_pct_go, args=("pct",), help="Günün oyunları üzrə faiz səhifəsi")
 
 # Üzən kupon paneli və analiz düyməsi: kupon solda, analiz sağda.
 with st.container(key="coupon_float_button"):
