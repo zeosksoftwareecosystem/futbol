@@ -1211,7 +1211,10 @@ def _live_one(slug):
                 continue
             d = pd.to_datetime(ev['date'], utc=True).tz_localize(None).normalize()
             detail = str(stt.get('shortDetail') or ev['status'].get('displayClock') or '').strip()
+            hh_, ha_ = _espn_ht(h), _espn_ht(a)
             out.append({'home': h['team']['displayName'], 'away': a['team']['displayName'], 'hs': int(hs), 'as': int(as_),
+                        'ht_h': int(hh_) if pd.notna(hh_) else None, 'ht_a': int(ha_) if pd.notna(ha_) else None,
+                        'id': str(ev.get('id', '')), 'slug': slug,
                         'live': state == 'in', 'detail': detail, 'date': d})
         except (KeyError, IndexError, TypeError, ValueError):
             continue
@@ -1511,7 +1514,9 @@ def _pct_catalog(thr):
         key = 'künc' if 'künc' in nm else ('dəqiq zərbə' if 'dəqiq' in nm else 'zərbə')
         ch, ca = cols[key]
         cat[nm] = (lambda ch_, ca_, mode_, t_: lambda d: _pct_atleast(d, ch_, ca_, mode_, t_))(ch, ca, 'Klub' if nm.startswith('Klub') else 'Oyunda', t)
-    return cat
+    # Siyahı sırası: əvvəl ən çox işlənənlər, sonra qalanları
+    first = ['1-ci hissə 0.5 üst', '1-ci hissə 1.5 üst', 'Matç 2.5 üst', 'Matç 3.5 üst', 'BTTS (hər ikisi qol vurur)']
+    return {**{k: cat[k] for k in first if k in cat}, **{k: v for k, v in cat.items() if k not in first}}
 
 
 def _pct_label(nm, thr):
@@ -1556,7 +1561,267 @@ def _pct_for(H, team_arr, day_arr, n):
     return hits, den, pct
 
 
-def _pct_games(d):
+# ---- API-Football (api-sports.io): hesab + 1-ci hissə + künc/zərbə (ESPN-in çatışmayanını tamamlayır) ----
+# Açar: Streamlit Secrets-də  APIFOOTBALL_KEY = "..."  (və ya mühit dəyişəni). Kodun içinə yazılmır ki, GitHub-da görünməsin.
+APIF_BASE = 'https://v3.football.api-sports.io'
+APIF_DAILY_CAP = 90          # pulsuz plan: gündə 100 sorğu; bunu keçməsin
+APIF_STATS_PER_RUN = 25      # bir səhifə yüklənməsində ən çox neçə oyunun statistikası çəkilsin
+APIF_FILE = ROOT / 'apif_cache.json'
+_apif_lock = _rf_threading.Lock()
+
+
+def _apif_key():
+    try:
+        k = st.secrets.get('APIFOOTBALL_KEY', '')
+    except Exception:
+        k = ''
+    import os
+    return str(k or os.environ.get('APIFOOTBALL_KEY', '')).strip()
+
+
+def _apif_load():
+    try:
+        return json.loads(APIF_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+
+
+def _apif_save(c):
+    try:
+        APIF_FILE.write_text(json.dumps(c), encoding='utf-8')
+    except Exception:
+        pass
+
+
+def _apif_get(path, params):
+    """Sorğu göndərir, gündəlik limiti sayır. Qaytarır (response_list, xəta_mətni_və_ya_None)."""
+    key = _apif_key()
+    if not key:
+        return [], 'açar yoxdur'
+    today = baku_today().isoformat()
+    with _apif_lock:
+        c = _apif_load()
+        used = c.get('used', {})
+        if used.get('day') != today:
+            used = {'day': today, 'n': 0}
+        if used['n'] >= APIF_DAILY_CAP:
+            return [], f'gündəlik limit ({APIF_DAILY_CAP}) dolub'
+        used['n'] += 1
+        c['used'] = used
+        _apif_save(c)
+    try:
+        r = requests.get(f'{APIF_BASE}/{path}', params=params, headers={'x-apisports-key': key}, timeout=15)
+        if r.status_code != 200:
+            return [], f'HTTP {r.status_code}'
+        j = r.json()
+    except (requests.RequestException, ValueError) as e:
+        return [], type(e).__name__
+    errs = j.get('errors')
+    if errs:
+        return [], (' · '.join(str(v) for v in errs.values()) if isinstance(errs, dict) else str(errs))[:200]
+    return j.get('response') or [], None
+
+
+_APIF_FINISHED = {'FT', 'AET', 'PEN'}
+_APIF_LIVE = {'1H', 'HT', '2H', 'ET', 'BT', 'P', 'LIVE', 'INT'}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _apif_day(date_str):
+    """Bir günün bütün oyunları (1 sorğu). Qaytarır (sətirlər, xəta)."""
+    resp, err = _apif_get('fixtures', {'date': date_str, 'timezone': 'Asia/Baku'})
+    rows = []
+    for it in resp:
+        try:
+            fx, tm, gl, sc = it['fixture'], it['teams'], it.get('goals') or {}, it.get('score') or {}
+            sh = (fx.get('status') or {}).get('short', '')
+            if sh not in _APIF_FINISHED and sh not in _APIF_LIVE:
+                continue
+            hs, as_ = gl.get('home'), gl.get('away')
+            if hs is None or as_ is None:
+                continue
+            ht = sc.get('halftime') or {}
+            rows.append({'home': tm['home']['name'], 'away': tm['away']['name'],
+                         'home_k': team_key(tm['home']['name']), 'away_k': team_key(tm['away']['name']),
+                         'hs': int(hs), 'as': int(as_),
+                         'ht_h': ht.get('home'), 'ht_a': ht.get('away'),
+                         'live': sh in _APIF_LIVE, 'finished': sh in _APIF_FINISHED,
+                         'date': pd.to_datetime(fx['date'], utc=True).tz_localize(None).normalize(),
+                         'fid': int(fx['id']), 'home_id': tm['home']['id']})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return rows, err
+
+
+def _apif_stats_parse(resp, home_id):
+    out = {}
+    for t in resp:
+        side = 'home' if (t.get('team') or {}).get('id') == home_id else 'away'
+        for it in t.get('statistics') or []:
+            typ, v = str(it.get('type', '')).lower(), it.get('value')
+            v = 0 if v is None else pd.to_numeric(v, errors='coerce')
+            if pd.isna(v):
+                continue
+            if typ == 'corner kicks':
+                out[f'{side}_corners'] = int(v)
+            elif typ == 'total shots':
+                out[f'{side}_shots'] = int(v)
+            elif typ == 'shots on goal':
+                out[f'{side}_target'] = int(v)
+    for a_, b_ in (('home_corners', 'away_corners'), ('home_shots', 'away_shots'), ('home_target', 'away_target')):
+        if not (a_ in out and b_ in out):
+            out.pop(a_, None)
+            out.pop(b_, None)
+    return out
+
+
+def _apif_stats(fid, home_id):
+    """Bitmiş oyunun statistikası; nəticə diskdə saxlanır ki, eyni oyun üçün sorğu təkrar getməsin."""
+    with _apif_lock:
+        c = _apif_load()
+        hit = c.get('stats', {}).get(str(fid))
+    if hit is not None:
+        return hit
+    resp, err = _apif_get('fixtures/statistics', {'fixture': fid})
+    if err:
+        return {}
+    out = _apif_stats_parse(resp, home_id)
+    with _apif_lock:
+        c = _apif_load()
+        c.setdefault('stats', {})[str(fid)] = out
+        _apif_save(c)
+    return out
+
+
+# ---- football-data.org (v4): hesab + 1-ci hissə (künc/zərbə vermir). Açar: Secrets-də FOOTBALLDATA_KEY ----
+FDORG_BASE = 'https://api.football-data.org/v4'
+
+
+def _fdorg_key():
+    try:
+        k = st.secrets.get('FOOTBALLDATA_KEY', '')
+    except Exception:
+        k = ''
+    import os
+    return str(k or os.environ.get('FOOTBALLDATA_KEY', '')).strip()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _fdorg_day(date_str):
+    """Bir günün oyunları (1 sorğu; pulsuz plan dəqiqədə 10). Qaytarır (sətirlər, xəta)."""
+    key = _fdorg_key()
+    if not key:
+        return [], 'açar yoxdur'
+    try:
+        r = requests.get(f'{FDORG_BASE}/matches', params={'dateFrom': date_str, 'dateTo': date_str},
+                         headers={'X-Auth-Token': key}, timeout=15)
+        if r.status_code != 200:
+            return [], f'HTTP {r.status_code}'
+        data = r.json()
+    except (requests.RequestException, ValueError) as e:
+        return [], type(e).__name__
+    rows = []
+    for m in data.get('matches', []) or []:
+        try:
+            stt = m.get('status', '')
+            if stt not in ('FINISHED', 'IN_PLAY', 'PAUSED'):
+                continue
+            sc = m.get('score') or {}
+            ft, ht = sc.get('fullTime') or {}, sc.get('halfTime') or {}
+            if ft.get('home') is None or ft.get('away') is None:
+                continue
+            hn, an = m['homeTeam']['name'], m['awayTeam']['name']
+            rows.append({'home': hn, 'away': an, 'home_k': team_key(hn), 'away_k': team_key(an),
+                         'hs': int(ft['home']), 'as': int(ft['away']),
+                         'ht_h': ht.get('home'), 'ht_a': ht.get('away'),
+                         'live': stt != 'FINISHED', 'finished': stt == 'FINISHED',
+                         'date': pd.to_datetime(m['utcDate'], utc=True).tz_localize(None).normalize()})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return rows, None
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _live_stats_cached(pairs):
+    """[(slug, id), ...] -> {id: {home_corners:..}}; bu gün bitmiş oyunların künc/zərbəsi (yeniləmə gözlənilmədən)."""
+    from concurrent.futures import ThreadPoolExecutor as _TP
+    pairs = list(pairs)
+    if not pairs:
+        return {}
+    with _TP(max_workers=16) as ex:
+        got = list(ex.map(lambda t: _espn_stats(t[0], t[1]), pairs))
+    return {i: st_ for (_, i), st_ in zip(pairs, got) if st_}
+
+
+def _pct_overlay_live(g, need_stats=False):
+    """Bazada hesabı/yarımvaxtı olmayan (hələ yenilənməmiş) oyunlara canlı ESPN məlumatını əlavə edir."""
+    try:
+        live = fetch_live_scores()
+    except Exception:
+        return g
+    apif_rows, apif_err = [], None
+    if _apif_key() and not g.empty:
+        apif_rows, apif_err = _apif_day(pd.Timestamp(g['date'].iloc[0]).strftime('%Y-%m-%d'))
+    st.session_state['_apif_err'] = apif_err
+    fd_rows, fd_err = [], None
+    if _fdorg_key() and not g.empty:
+        fd_rows, fd_err = _fdorg_day(pd.Timestamp(g['date'].iloc[0]).strftime('%Y-%m-%d'))
+    st.session_state['_fd_err'] = fd_err
+    if (not live and not apif_rows and not fd_rows) or g.empty:
+        return g
+    live = list(live or [])
+    g = g.copy()
+    idx = {}
+    for r in live:
+        idx.setdefault((r['home_k'], r['away_k']), []).append(r)
+    aidx, fidx = {}, {}
+    for r in fd_rows:
+        fidx.setdefault((r['home_k'], r['away_k']), []).append(r)
+    for r in apif_rows:
+        aidx.setdefault((r['home_k'], r['away_k']), []).append(r)
+    for c in ('ft_home', 'ft_away', 'ht_home', 'ht_away', 'home_corners', 'away_corners',
+              'home_shots', 'away_shots', 'home_target', 'away_target'):
+        if c not in g.columns:
+            g[c] = np.nan
+    pend, apend = [], []
+    for i in g.index:
+        hk, ak, dt = g.at[i, 'home_k'], g.at[i, 'away_k'], pd.Timestamp(g.at[i, 'date'])
+        def _find(ix, rows):
+            c_ = ix.get((hk, ak))
+            if not c_:
+                c_ = [r for r in rows if names_compatible(r['home_k'], hk) and names_compatible(r['away_k'], ak)]
+            return [r for r in (c_ or []) if abs((r['date'] - dt.normalize()).days) <= 1]
+        e_c, a_c, f_c = _find(idx, live), _find(aidx, apif_rows), _find(fidx, fd_rows)
+        # Əvvəl ESPN, çatışmayanı API-Football, sonra football-data.org tamamlayır
+        for r in e_c + a_c + f_c:
+            if pd.isna(g.at[i, 'ft_home']) or pd.isna(g.at[i, 'ft_away']):
+                g.at[i, 'ft_home'], g.at[i, 'ft_away'] = r['hs'], r['as']
+            if (pd.isna(g.at[i, 'ht_home']) or pd.isna(g.at[i, 'ht_away'])) and r.get('ht_h') is not None and r.get('ht_a') is not None:
+                g.at[i, 'ht_home'], g.at[i, 'ht_away'] = r['ht_h'], r['ht_a']
+        if need_stats and pd.isna(g.at[i, 'home_corners']):
+            if e_c and not e_c[0]['live'] and e_c[0].get('id'):
+                pend.append((i, e_c[0]['slug'], e_c[0]['id']))
+            if a_c and a_c[0]['finished']:
+                apend.append((i, a_c[0]['fid'], a_c[0]['home_id']))
+    if pend:
+        st_map = _live_stats_cached(tuple(sorted({(sl, ev) for _, sl, ev in pend})))
+        for i, _, ev in pend:
+            for k, v in (st_map.get(ev) or {}).items():
+                if k in g.columns:
+                    g.at[i, k] = v
+    # ESPN statistikası gətirməyən bitmiş oyunlar üçün API-Football (sorğu sayı məhduddur, nəticə diskdə saxlanır)
+    left = [t for t in apend if pd.isna(g.at[t[0], 'home_corners'])][:APIF_STATS_PER_RUN]
+    if left:
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            got = list(ex.map(lambda t: _apif_stats(t[1], t[2]), left))
+        for (i, _, _), st_ in zip(left, got):
+            for k, v in (st_ or {}).items():
+                if k in g.columns and pd.isna(g.at[i, k]):
+                    g.at[i, k] = v
+    return g
+
+
+def _pct_games(d, need_stats=False):
     d = pd.Timestamp(d).normalize()
     base = ['date', 'time', 'home', 'away', 'league', 'home_k', 'away_k']
     extra = ['ft_home', 'ft_away', 'ht_home', 'ht_away', 'home_corners', 'away_corners',
@@ -1575,7 +1840,8 @@ def _pct_games(d):
     if not parts:
         return pd.DataFrame(columns=base + extra)
     g = pd.concat(parts, ignore_index=True).dropna(subset=['home', 'away', 'home_k', 'away_k'])
-    return g.drop_duplicates(subset=['home_k', 'away_k'], keep='first').reset_index(drop=True)
+    g = g.drop_duplicates(subset=['home_k', 'away_k'], keep='first').reset_index(drop=True)
+    return _pct_overlay_live(g, need_stats)
 
 
 def _pct_shift(days):
@@ -1660,7 +1926,7 @@ def render_pct_page():
                 r1.markdown(f'**{_pct_label(nm, thr)}**')
                 r2.button('✖', key=f'p_rm_{i}', on_click=_pct_remove, args=(nm,), use_container_width=True, help='Filtri sil')
 
-    g = _pct_games(st.session_state['p_date'])
+    g = _pct_games(st.session_state['p_date'], need_stats=any(x in _PCT_STAT for x in chosen))
     if g.empty:
         st.info('Bu tarixdə bazada oyun yoxdur. Başqa gün seç və ya əsas səhifədən məlumatı yenilə.')
         return
@@ -1716,6 +1982,10 @@ def render_pct_page():
     out = out.sort_values(['_tam', 'Orta %', 'Saat'], ascending=[False, False, True], na_position='last', kind='stable')
     n_full = int(out['_tam'].sum())
     out = out.drop(columns=['_tam'])
+    for _nm_, _k_ in (('API-Football', '_apif_err'), ('football-data.org', '_fd_err')):
+        _ae = st.session_state.get(_k_)
+        if _ae and _ae != 'açar yoxdur':
+            st.caption(f'⚠️ {_nm_}: {_ae}')
     labels = ' + '.join(_pct_label(x, thr) for x in chosen)
     top = out['Orta %'].max() if len(out) else np.nan
     st.markdown(f'**Seçilmiş filtr:** {labels} · **Son oyun sayı:** {int(n)} · **Siyahıda:** {len(out)} oyun'
