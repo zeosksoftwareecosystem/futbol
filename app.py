@@ -328,6 +328,38 @@ section[data-testid="stSidebar"] .stButton button { border-radius: 10px; font-we
   div[data-testid="stNumberInput"] input, div[data-testid="stDateInput"] input, div[data-testid="stTextInput"] input { font-size: 16px !important; }
   div.st-key-analyze_button { bottom: calc(105px + env(safe-area-inset-bottom)) !important; width: auto !important; max-width: none !important; }
   div.st-key-analyze_button button { width: 100% !important; min-height: 48px !important; font-size: 15px !important; border-radius: 13px !important; }
+  /* Mobil: tarix oxları, tarix seçicisi və sağ ox həmişə bir sətirdə qalsın. */
+  [class*="st-key-start_date_row"] [data-testid="stHorizontalBlock"],
+  [class*="st-key-end_date_row"] [data-testid="stHorizontalBlock"] {
+    display: flex !important; flex-direction: row !important; flex-wrap: nowrap !important;
+    align-items: center !important; gap: 3px !important; width: 100% !important;
+  }
+  [class*="st-key-start_date_row"] [data-testid="stColumn"],
+  [class*="st-key-start_date_row"] [data-testid="column"],
+  [class*="st-key-end_date_row"] [data-testid="stColumn"],
+  [class*="st-key-end_date_row"] [data-testid="column"] {
+    min-width: 0 !important; flex-shrink: 1 !important;
+  }
+  [class*="st-key-start_date_row"] [data-testid="stColumn"]:first-child,
+  [class*="st-key-start_date_row"] [data-testid="column"]:first-child,
+  [class*="st-key-start_date_row"] [data-testid="stColumn"]:last-child,
+  [class*="st-key-start_date_row"] [data-testid="column"]:last-child,
+  [class*="st-key-end_date_row"] [data-testid="stColumn"]:first-child,
+  [class*="st-key-end_date_row"] [data-testid="column"]:first-child,
+  [class*="st-key-end_date_row"] [data-testid="stColumn"]:last-child,
+  [class*="st-key-end_date_row"] [data-testid="column"]:last-child { flex: 0 0 1.8rem !important; }
+  [class*="st-key-start_date_row"] [data-testid="stColumn"]:nth-child(2),
+  [class*="st-key-start_date_row"] [data-testid="column"]:nth-child(2),
+  [class*="st-key-end_date_row"] [data-testid="stColumn"]:nth-child(2),
+  [class*="st-key-end_date_row"] [data-testid="column"]:nth-child(2) { flex: 1 1 0 !important; }
+  [class*="st-key-start_date_row"] button, [class*="st-key-end_date_row"] button {
+    min-width: 1.8rem !important; width: 1.8rem !important; height: 2.25rem !important;
+    min-height: 2.25rem !important; padding: 0 !important; font-size: .85rem !important;
+  }
+  [class*="st-key-start_date_row"] [data-testid="stDateInput"],
+  [class*="st-key-end_date_row"] [data-testid="stDateInput"] { min-width: 0 !important; width: 100% !important; }
+  [class*="st-key-start_date_row"] [data-testid="stDateInput"] input,
+  [class*="st-key-end_date_row"] [data-testid="stDateInput"] input { min-width: 0 !important; width: 100% !important; font-size: .78rem !important; padding: 0 .2rem !important; }
 }
 </style>
 """
@@ -1452,7 +1484,7 @@ if _page == "📊 Günlük Faiz Analizi":
     }
     _d1, _d2 = st.columns([3, 1])
     _daily_market = _d1.selectbox("Faiz filtri", list(_daily_markets), index=1, key="daily_market")
-    _daily_n = _d2.selectbox("Hər klubun son oyun sayı", [5, 10, 15, 20, 25, 30], index=1, key="daily_n")
+    _daily_n = _d2.number_input("Hər klubun son oyun sayı", min_value=1, max_value=100, value=10, step=1, key="daily_n")
     _daily_kind, _daily_line = _daily_markets[_daily_market]
     if _daily_kind in ("corners_match", "corners_team", "shots_match", "shots_team", "target_match", "target_team"):
         _daily_threshold = st.number_input(
@@ -1575,12 +1607,21 @@ if _page == "📊 Günlük Faiz Analizi":
         _time = str(_game.get("time", "")).strip()
         if _time.lower() in ("nan", "nat", "none"):
             _time = "—"
+        # Bitmiş oyunlarda həm ilk hissənin, həm də yekun matçın hesabını göstər.
+        _ft_h = pd.to_numeric(pd.Series([_game.get("ft_home")]), errors="coerce").iloc[0]
+        _ft_a = pd.to_numeric(pd.Series([_game.get("ft_away")]), errors="coerce").iloc[0]
+        _ht_h = pd.to_numeric(pd.Series([_game.get("ht_home")]), errors="coerce").iloc[0]
+        _ht_a = pd.to_numeric(pd.Series([_game.get("ht_away")]), errors="coerce").iloc[0]
+        _ft_score = f"{int(_ft_h)}–{int(_ft_a)}" if pd.notna(_ft_h) and pd.notna(_ft_a) else "—"
+        _ht_score = f"{int(_ht_h)}–{int(_ht_a)}" if pd.notna(_ht_h) and pd.notna(_ht_a) else "—"
         _daily_rows.append({
             "Tarix": pd.to_datetime(_game["date"]).strftime("%d.%m.%Y"),
             "Saat": _time,
             "Liqa": _game.get("league", ""),
             "Ev sahibi": _game.get("home", ""),
             "Qonaq": _game.get("away", ""),
+            "1-ci hissə hesabı": _ht_score,
+            "Matç hesabı": _ft_score,
             "Ev klubu": f"{_hhits}/{_htotal} ({_hp:.0f}%)" if _hp is not None else "Məlumat çatmır",
             "Səfər klubu": f"{_ahits}/{_atotal} ({_ap:.0f}%)" if _ap is not None else "Məlumat çatmır",
             "Orta faiz": _avg,
