@@ -1675,14 +1675,15 @@ def render_pct_page():
     tot = np.nan_to_num(hp) + np.nan_to_num(ap)
     avg = np.where(cnt > 0, tot / np.maximum(cnt, 1), np.nan)
     complete = (hd >= int(n)) & (ad >= int(n))
+    fmt = lambda h, d, p: [f'{a}/{b} ({q:.0f}%)' if b else '—' for a, b, q in zip(h, d, p)]
     out = pd.DataFrame({
-        'Saat': tm, 'Liqa': g['league'], 'Ev sahibi': g['home'], 'Qonaq': g['away'],
-        'Ev': [f'{a}/{b}' if b else '—' for a, b in zip(hh, hd)], 'Ev %': hp,
-        'Qonaq ': [f'{a}/{b}' if b else '—' for a, b in zip(ah, ad)], 'Qonaq %': ap,
-        'Orta %': avg,
-        'Məlumat': np.where(complete, '✓ tam', '⚠️ kəsik'),
+        'Saat': tm, 'Ev sahibi': g['home'], 'Qonaq': g['away'],
         '1-ci hissə': _pct_score(g['ht_home'], g['ht_away']),
         'Hesab': _pct_score(g['ft_home'], g['ft_away']),
+        'Ev faizi': fmt(hh, hd, hp), 'Qonaq faizi': fmt(ah, ad, ap),
+        'Orta %': avg,
+        'Məlumat': np.where(complete, '✓ tam', '⚠️ kəsik'),
+        'Liqa': g['league'],
     })
     out['_tam'] = complete.astype(int)
     min_pct = st.slider('Minimum orta faiz', 0, 100, 0, step=5, key='p_min')
@@ -1700,10 +1701,9 @@ def render_pct_page():
     if out.empty:
         st.info('Bu şərtlərə uyğun oyun yoxdur. Minimum faizi azalt.')
         return
-    pc = lambda t: st.column_config.ProgressColumn(t, min_value=0, max_value=100, format='%.0f%%')
     st.dataframe(out, hide_index=True, use_container_width=True, height=min(720, 38 + 35 * len(out)),
-                 column_config={'Ev %': pc('Ev %'), 'Qonaq %': pc('Qonaq %'), 'Orta %': pc('Orta %'), 'Qonaq ': st.column_config.TextColumn('Qonaq')})
-    st.caption('Ev / Qonaq: komandanın son oyunlarında filtrlərin tutduğu say (məs. 8/10). Statistikası olmayan oyunlar məxrəcə daxil edilmir. '
+                 column_config={'Orta %': st.column_config.NumberColumn('Orta %', format='%.0f%%')})
+    st.caption('Ev / Qonaq faizi: komandanın son oyunlarında filtrlərin tutduğu say (məs. 8/10 = 80%). Statistikası olmayan oyunlar məxrəcə daxil edilmir. '
                '"Klub" filtrində hər klubun öz göstəricisi yoxlanılır.')
     st.download_button('⬇️ Siyahını CSV yüklə', out.to_csv(index=False).encode('utf-8-sig'),
                        file_name=f"faiz_{st.session_state['p_date']:%Y-%m-%d}.csv", mime='text/csv', key='p_csv')
