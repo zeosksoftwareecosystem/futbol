@@ -1451,13 +1451,16 @@ with st.container(border=True, key='db_panel'):
             v = st.secrets.get(nm, '')
         except Exception:
             v = ''
-        return bool(str(v or _os.environ.get(nm, '')).strip())
+        fallbacks = {'APIFOOTBALL_KEY': '9f2df11abce1dfe78653698fa3a75aed',
+                     'FOOTBALLAPI_KEY': 'fa_live_FH9W8QSJ61WM9HJ8PSMYNB98'}
+        return bool(str(v or _os.environ.get(nm, '') or fallbacks.get(nm, '')).strip())
     try:
         _u = json.loads((ROOT / 'apif_cache.json').read_text(encoding='utf-8')).get('used', {})
         _used = int(_u.get('n', 0)) if _u.get('day') == baku_today().isoformat() else 0
     except Exception:
         _used = 0
-    st.caption('🔌 Canlı mənbələr (faiz səhifəsində hesab, 1-ci hissə, statistika üçün; bazanın yenilənməsinə aid deyil): '
+    st.caption('🔌 Canlı mənbələr (faiz səhifəsində hesab və 1-ci hissə üçün; bazanın yenilənməsinə aid deyil): '
+               f"Football API {'✓ açar var · yalnız EPL · 50 sorğu/gün' if _has_key('FOOTBALLAPI_KEY') else '✗ açar yoxdur'} · "
                f"API-Football {'✓ açar var · bu gün ' + str(_used) + ' sorğu' if _has_key('APIFOOTBALL_KEY') else '✗ açar yoxdur'} · "
                f"football-data.org {'✓ açar var' if _has_key('FOOTBALLDATA_KEY') else '✗ açar yoxdur'}")
 
@@ -1585,12 +1588,13 @@ _apif_lock = _rf_threading.Lock()
 
 
 def _apif_key():
+    # Əvvəlcə Streamlit Secrets / mühit dəyişəni, yoxdursa istifadəçinin verdiyi açar.
     try:
         k = st.secrets.get('APIFOOTBALL_KEY', '')
     except Exception:
         k = ''
     import os
-    return str(k or os.environ.get('APIFOOTBALL_KEY', '')).strip()
+    return str(k or os.environ.get('APIFOOTBALL_KEY', '') or '9f2df11abce1dfe78653698fa3a75aed').strip()
 
 
 def _apif_load():
@@ -1707,6 +1711,88 @@ def _apif_stats(fid, home_id):
     return out
 
 
+# ---- Football API (footballapi.org): pulsuz plan üçün EPL nəticələri / 1-ci hissə ----
+# Açar: əvvəlcə Streamlit Secrets FOOTBALLAPI_KEY və ya mühit dəyişəni, sonra istifadəçinin verdiyi açar.
+FOOTBALLAPI_BASE = 'https://api.footballapi.org/v1'
+
+def _footballapi_key():
+    try:
+        k = st.secrets.get('FOOTBALLAPI_KEY', '')
+    except Exception:
+        k = ''
+    import os
+    return str(k or os.environ.get('FOOTBALLAPI_KEY', '') or 'fa_live_FH9W8QSJ61WM9HJ8PSMYNB98').strip()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _footballapi_day(date_str):
+    """Football API-dən seçilmiş günün EPL oyunlarını gətirir; hesab və HT hesabını standart formaya salır."""
+    key = _footballapi_key()
+    if not key:
+        return [], 'açar yoxdur'
+    try:
+        r = requests.get(
+            f'{FOOTBALLAPI_BASE}/matches',
+            params={'competition': 'premier-league', 'date_from': date_str,
+                    'date_to': date_str, 'per_page': 100},
+            headers={'X-API-Key': key}, timeout=12)
+        if r.status_code != 200:
+            try:
+                detail = (r.json().get('error') or r.json().get('message') or r.json().get('code') or '')
+            except Exception:
+                detail = ''
+            return [], f'Football API HTTP {r.status_code}' + (f': {detail}' if detail else '')
+        payload = r.json()
+    except (requests.RequestException, ValueError) as e:
+        return [], f'Football API: {type(e).__name__}'
+
+    rows = []
+    for m in payload.get('data', []) or []:
+        try:
+            # Sənədin müxtəlif cavab formatlarını qəbul et.
+            home = m.get('home_club_name') or m.get('home') or (m.get('home_team') or {}).get('name')
+            away = m.get('away_club_name') or m.get('away') or (m.get('away_team') or {}).get('name')
+            score = m.get('score') or {}
+            ft_home = m.get('home_goals', score.get('home'))
+            ft_away = m.get('away_goals', score.get('away'))
+            ht_home = m.get('half_time_home_goals')
+            ht_away = m.get('half_time_away_goals')
+            if ht_home is None or ht_away is None:
+                ht = score.get('half_time') or score.get('halftime') or ''
+                if isinstance(ht, str) and '-' in ht:
+                    a, b = ht.split('-', 1)
+                    try:
+                        ht_home, ht_away = int(a.strip()), int(b.strip())
+                    except ValueError:
+                        pass
+                elif isinstance(ht, dict):
+                    ht_home = ht.get('home', ht_home)
+                    ht_away = ht.get('away', ht_away)
+            if not home or not away:
+                continue
+            raw_date = m.get('kickoff_utc') or m.get('utcDate') or m.get('date')
+            if raw_date:
+                dt = pd.to_datetime(raw_date, utc=True, errors='coerce')
+                if pd.isna(dt):
+                    continue
+                dt = dt.tz_localize(None).normalize()
+            else:
+                dt = pd.Timestamp(date_str)
+            status = str(m.get('match_status') or m.get('status') or '').lower()
+            finished = status in {'finished', 'full_time', 'ft', 'complete', 'completed'}
+            live = status in {'in_play', 'live', 'paused', '1h', '2h', 'ht'}
+            rows.append({'home': str(home), 'away': str(away),
+                         'home_k': team_key(str(home)), 'away_k': team_key(str(away)),
+                         'hs': int(ft_home) if ft_home is not None else None,
+                         'as': int(ft_away) if ft_away is not None else None,
+                         'ht_h': int(ht_home) if ht_home is not None else None,
+                         'ht_a': int(ht_away) if ht_away is not None else None,
+                         'live': live, 'finished': finished, 'date': dt})
+        except (TypeError, ValueError):
+            continue
+    return rows, None
+
+
 # ---- football-data.org (v4): hesab + 1-ci hissə (künc/zərbə vermir). Açar: Secrets-də FOOTBALLDATA_KEY ----
 FDORG_BASE = 'https://api.football-data.org/v4'
 
@@ -1772,28 +1858,35 @@ def _pct_overlay_live(g, need_stats=False):
     try:
         live = fetch_live_scores()
     except Exception:
-        return g
+        # ESPN xətası digər mənbələrin işləməsinə mane olmamalıdır.
+        live = []
     apif_rows, apif_err = [], None
-    # Pulsuz plan yalnız dünən/bu gün/sabah tarixlərinə icazə verir; kənar tarixdə sorğu göndərib limiti əbəs yerə xərcləmirik
+    # Yalnız yaxın tarixlərdə API sorğusu göndər; cavab 5 dəqiqə keşlənir.
     if _apif_key() and not g.empty and abs((pd.Timestamp(g['date'].iloc[0]).date() - baku_today()).days) <= 1:
         apif_rows, apif_err = _apif_day(pd.Timestamp(g['date'].iloc[0]).strftime('%Y-%m-%d'))
     st.session_state['_apif_err'] = apif_err
+    footballapi_rows, footballapi_err = [], None
+    if _footballapi_key() and not g.empty and abs((pd.Timestamp(g['date'].iloc[0]).date() - baku_today()).days) <= 1:
+        footballapi_rows, footballapi_err = _footballapi_day(pd.Timestamp(g['date'].iloc[0]).strftime('%Y-%m-%d'))
+    st.session_state['_footballapi_err'] = footballapi_err
     fd_rows, fd_err = [], None
     if _fdorg_key() and not g.empty:
         fd_rows, fd_err = _fdorg_day(pd.Timestamp(g['date'].iloc[0]).strftime('%Y-%m-%d'))
     st.session_state['_fd_err'] = fd_err
-    if (not live and not apif_rows and not fd_rows) or g.empty:
+    if (not live and not apif_rows and not footballapi_rows and not fd_rows) or g.empty:
         return g
     live = list(live or [])
     g = g.copy()
     idx = {}
     for r in live:
         idx.setdefault((r['home_k'], r['away_k']), []).append(r)
-    aidx, fidx = {}, {}
+    aidx, fidx, bidx = {}, {}, {}
     for r in fd_rows:
         fidx.setdefault((r['home_k'], r['away_k']), []).append(r)
     for r in apif_rows:
         aidx.setdefault((r['home_k'], r['away_k']), []).append(r)
+    for r in footballapi_rows:
+        bidx.setdefault((r['home_k'], r['away_k']), []).append(r)
     for c in ('ft_home', 'ft_away', 'ht_home', 'ht_away', 'home_corners', 'away_corners',
               'home_shots', 'away_shots', 'home_target', 'away_target'):
         if c not in g.columns:
@@ -1806,10 +1899,11 @@ def _pct_overlay_live(g, need_stats=False):
             if not c_:
                 c_ = [r for r in rows if names_compatible(r['home_k'], hk) and names_compatible(r['away_k'], ak)]
             return [r for r in (c_ or []) if abs((r['date'] - dt.normalize()).days) <= 1]
+        b_c = _find(bidx, footballapi_rows)
         e_c, a_c, f_c = _find(idx, live), _find(aidx, apif_rows), _find(fidx, fd_rows)
-        # Əvvəl ESPN, çatışmayanı API-Football, sonra football-data.org tamamlayır
-        for r in e_c + a_c + f_c:
-            if pd.isna(g.at[i, 'ft_home']) or pd.isna(g.at[i, 'ft_away']):
+        # Əvvəl ESPN, sonra istifadəçinin verdiyi Football API, API-Football və football-data.org.
+        for r in e_c + b_c + a_c + f_c:
+            if (pd.isna(g.at[i, 'ft_home']) or pd.isna(g.at[i, 'ft_away'])) and r.get('hs') is not None and r.get('as') is not None:
                 g.at[i, 'ft_home'], g.at[i, 'ft_away'] = r['hs'], r['as']
             if (pd.isna(g.at[i, 'ht_home']) or pd.isna(g.at[i, 'ht_away'])) and r.get('ht_h') is not None and r.get('ht_a') is not None:
                 g.at[i, 'ht_home'], g.at[i, 'ht_away'] = r['ht_h'], r['ht_a']
@@ -2072,7 +2166,7 @@ def render_pct_result(P, cur_key):
     if min_pct > 0:
         out = out[out['Orta %'] >= min_pct]
     n_full = int(out['_tam'].sum())
-    for _nm_, _k_ in (('API-Football', '_apif_err'), ('football-data.org', '_fd_err')):
+    for _nm_, _k_ in (('Football API', '_footballapi_err'), ('API-Football', '_apif_err'), ('football-data.org', '_fd_err')):
         _ae = st.session_state.get(_k_)
         if _ae and _ae != 'açar yoxdur':
             st.caption(f'⚠️ {_nm_}: {_ae}')
