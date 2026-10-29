@@ -1451,9 +1451,7 @@ with st.container(border=True, key='db_panel'):
             v = st.secrets.get(nm, '')
         except Exception:
             v = ''
-        fallbacks = {'APIFOOTBALL_KEY': '9f2df11abce1dfe78653698fa3a75aed',
-                     'FOOTBALLAPI_KEY': 'fa_live_FH9W8QSJ61WM9HJ8PSMYNB98'}
-        return bool(str(v or _os.environ.get(nm, '') or fallbacks.get(nm, '')).strip())
+        return bool(str(v or _os.environ.get(nm, '')).strip())
     try:
         _u = json.loads((ROOT / 'apif_cache.json').read_text(encoding='utf-8')).get('used', {})
         _used = int(_u.get('n', 0)) if _u.get('day') == baku_today().isoformat() else 0
@@ -1588,13 +1586,13 @@ _apif_lock = _rf_threading.Lock()
 
 
 def _apif_key():
-    # Əvvəlcə Streamlit Secrets / mühit dəyişəni, yoxdursa istifadəçinin verdiyi açar.
+    # Açar yalnız Streamlit Secrets və ya mühit dəyişənindən oxunur.
     try:
         k = st.secrets.get('APIFOOTBALL_KEY', '')
     except Exception:
         k = ''
     import os
-    return str(k or os.environ.get('APIFOOTBALL_KEY', '') or '9f2df11abce1dfe78653698fa3a75aed').strip()
+    return str(k or os.environ.get('APIFOOTBALL_KEY', '')).strip()
 
 
 def _apif_load():
@@ -1712,7 +1710,7 @@ def _apif_stats(fid, home_id):
 
 
 # ---- Football API (footballapi.org): pulsuz plan üçün EPL nəticələri / 1-ci hissə ----
-# Açar: əvvəlcə Streamlit Secrets FOOTBALLAPI_KEY və ya mühit dəyişəni, sonra istifadəçinin verdiyi açar.
+# Açar: Streamlit Secrets FOOTBALLAPI_KEY və ya mühit dəyişəni. Bu ayrıca xidmətdir.
 FOOTBALLAPI_BASE = 'https://api.footballapi.org/v1'
 
 def _footballapi_key():
@@ -1721,7 +1719,7 @@ def _footballapi_key():
     except Exception:
         k = ''
     import os
-    return str(k or os.environ.get('FOOTBALLAPI_KEY', '') or 'fa_live_FH9W8QSJ61WM9HJ8PSMYNB98').strip()
+    return str(k or os.environ.get('FOOTBALLAPI_KEY', '')).strip()
 
 
 @st.cache_data(ttl=300, show_spinner=False)
