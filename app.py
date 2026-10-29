@@ -1425,16 +1425,6 @@ def _scheduler_start(_state):
 
 
 _scheduler_start(_refresh_state())
-def _open_pct():
-    st.session_state['view_page'] = 'pct'
-
-
-def _close_pct():
-    st.session_state['view_page'] = 'main'
-
-
-if st.session_state.get('view_page') != 'pct':
-    st.button('📈 Faiz səhifəsi — günün oyunları faizlə', key='pct_nav', use_container_width=True, on_click=_open_pct)
 _rs0 = _refresh_state()
 with st.container(border=True, key='db_panel'):
     st.markdown('**📚 Məlumat bazası**')
@@ -1869,13 +1859,6 @@ def _pct_games(d, need_stats=False):
     return _pct_overlay_live(g, need_stats)
 
 
-def _pct_shift(days):
-    if days == 0:
-        st.session_state['p_date'] = baku_today()
-    else:
-        st.session_state['p_date'] = st.session_state['p_date'] + timedelta(days=days)
-
-
 def _pct_add():
     nm = st.session_state.get('p_add_sel')
     lst = st.session_state.setdefault('p_flt', [])
@@ -1908,12 +1891,12 @@ _PCT_STAT_COLS = {'künc': ('Künc', 'home_corners', 'away_corners'),
                   'zərbə': ('Zərbə', 'home_shots', 'away_shots')}
 
 
-def render_pct_page():
+_PCT_MAX_DAYS = 7   # tarix aralığında faiz cədvəli üçün ən çox neçə gün hesablansın (hər gün canlı mənbələrə sorğu gedir)
+
+
+def _pct_css():
     st.markdown("""<style>
-    .st-key-db_panel { display: none !important; }
-    .st-key-pct_datenav [data-testid="stHorizontalBlock"], .st-key-pct_addrow [data-testid="stHorizontalBlock"], [class*="st-key-pct_fl_"] [data-testid="stHorizontalBlock"] { flex-direction: row !important; flex-wrap: nowrap !important; gap: .4rem !important; align-items: center !important; }
-    .st-key-pct_datenav [data-testid="stColumn"], .st-key-pct_datenav [data-testid="column"] { min-width: 0 !important; width: auto !important; flex: 1 1 0 !important; }
-    .st-key-pct_datenav [data-testid="stColumn"]:nth-child(2), .st-key-pct_datenav [data-testid="column"]:nth-child(2) { flex: 4 1 0 !important; }
+    .st-key-pct_addrow [data-testid="stHorizontalBlock"], [class*="st-key-pct_fl_"] [data-testid="stHorizontalBlock"] { flex-direction: row !important; flex-wrap: nowrap !important; gap: .4rem !important; align-items: center !important; }
     .st-key-pct_addrow [data-testid="stColumn"], .st-key-pct_addrow [data-testid="column"], [class*="st-key-pct_fl_"] [data-testid="stColumn"], [class*="st-key-pct_fl_"] [data-testid="column"] { min-width: 0 !important; width: auto !important; }
     .st-key-pct_addrow [data-testid="stColumn"]:nth-child(1), .st-key-pct_addrow [data-testid="column"]:nth-child(1), [class*="st-key-pct_fl_"] [data-testid="stColumn"]:nth-child(1), [class*="st-key-pct_fl_"] [data-testid="column"]:nth-child(1) { flex: 1 1 0 !important; }
     .st-key-pct_addrow [data-testid="stColumn"]:nth-child(2), .st-key-pct_addrow [data-testid="column"]:nth-child(2), [class*="st-key-pct_fl_"] [data-testid="stColumn"]:nth-child(2), [class*="st-key-pct_fl_"] [data-testid="column"]:nth-child(2) { flex: 0 0 3rem !important; }
@@ -1921,27 +1904,38 @@ def render_pct_page():
     [class*="st-key-pct_thr_"] [data-testid="stColumn"], [class*="st-key-pct_thr_"] [data-testid="column"] { min-width: 0 !important; width: auto !important; }
     [class*="st-key-pct_thr_"] [data-testid="stColumn"]:nth-child(1), [class*="st-key-pct_thr_"] [data-testid="column"]:nth-child(1) { flex: 3 1 0 !important; }
     [class*="st-key-pct_thr_"] [data-testid="stColumn"]:nth-child(2), [class*="st-key-pct_thr_"] [data-testid="column"]:nth-child(2) { flex: 2 1 0 !important; }
-    .st-key-pct_datenav button { min-height: 2.6rem; font-weight: 700; }
-    [data-testid="stMainBlockContainer"], .block-container { padding-bottom: 8rem !important; }
+    /* Faiz cədvəli: öz scroll qutusu, sol "Oyun" sütunu və yuxarı başlıq sabit qalır, qalanı yana sürüşür */
+    .pct-wrap { overflow: auto; -webkit-overflow-scrolling: touch; max-height: 75vh; border: 1px solid rgba(128,128,128,.35);
+                border-radius: 12px; background: #fff; touch-action: pan-x pan-y; overscroll-behavior: contain; }
+    .pct-wrap::-webkit-scrollbar { height: 12px; width: 10px; }
+    .pct-wrap::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 8px; }
+    .pct-wrap::-webkit-scrollbar-track { background: #e2e8f0; }
+    table.pct { border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; font-size: 13px; color: #0f172a; }
+    table.pct th, table.pct td { padding: 7px 11px; white-space: nowrap; text-align: center; border-bottom: 1px solid #e2e8f0; background: #fff; }
+    table.pct tr:nth-child(even) td { background: #f8fafc; }
+    table.pct th { position: sticky; top: 0; z-index: 3; background: #0f766e; color: #fff; font-weight: 700; font-size: 12px; }
+    table.pct th.g, table.pct td.g { position: sticky; left: 0; text-align: left; z-index: 2; min-width: 130px; max-width: 44vw;
+                                      box-shadow: 2px 0 4px -2px rgba(0,0,0,.28); }
+    table.pct th.g { z-index: 4; }
+    table.pct td.g .tm { font-size: 11px; color: #64748b; }
+    table.pct td.g .tn { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+    table.pct tr.part td { color: #64748b; }
+    table.pct .pb { display: inline-block; min-width: 46px; padding: 2px 8px; border-radius: 999px; font-weight: 800; }
+    table.pct .pb.hi { background: #dcfce7; color: #166534; }
+    table.pct .pb.mid { background: #fef9c3; color: #854d0e; }
+    table.pct .pb.lo { background: #f1f5f9; color: #475569; }
     </style>""", unsafe_allow_html=True)
-    st.button('← Ana səhifə', key='pct_back', on_click=_close_pct)
-    st.markdown('<div class="hero"><h1>📈 Günün oyunları — faiz</h1>'
-                '<p>Filtr əlavə et: hər komandanın son N oyununda filtrlərin neçə dəfə tutduğu faizlə göstərilir (məsələn 10 oyundan 8 → 80%). '
-                'Ən yüksək faizli oyun siyahının başındadır, məlumatı kəsik oyunlar sonda qalır.</p></div>', unsafe_allow_html=True)
-    st.session_state.setdefault('p_date', baku_today())
-    with st.container(border=True):
-        with st.container(key='pct_datenav'):
-            c1, c2, c3 = st.columns([1, 4, 1])
-            c1.button('◀', key='p_prev', on_click=_pct_shift, args=(-1,), use_container_width=True, help='Əvvəlki gün')
-            c2.date_input('Tarix', key='p_date', label_visibility='collapsed')
-            c3.button('▶', key='p_next', on_click=_pct_shift, args=(1,), use_container_width=True, help='Növbəti gün')
-        st.button('📅 Bu gün', key='p_today', on_click=_pct_shift, args=(0,), use_container_width=True)
-        st.caption('🕒 Tarix və saatlar Bakı vaxtı ilədir (UTC+4).')
 
+
+def render_pct_filters():
+    """Faiz filtrləri paneli. (n, seçilmiş filtrlər, hədlər) qaytarır. Tarix və liqa əsas bölmədən götürülür."""
+    _pct_css()
     with st.container(border=True):
-        st.markdown('<div class="sec">Filtrlər</div>', unsafe_allow_html=True)
-        n = st.number_input('Hər komandanın son neçə oyununa baxılsın?', min_value=1, max_value=100, value=10, step=1, key='p_n')
-        # Hədlər aşağıdakı qutuda dəyişdirilir; burada session_state-dən oxunur (qutu açılanda "➕" düyməsi aşağı itməsin deyə ən sonda göstərilir)
+        st.markdown('<div class="sec">3 · Faiz filtrləri</div>', unsafe_allow_html=True)
+        st.caption('Hər komandanın son N oyununda bu filtrlərin neçə dəfə tutduğu faizlə göstərilir (məsələn 10 oyundan 8 → 80%). '
+                   'Tarix aralığı və liqalar yuxarıdakı 1-ci bölmədən götürülür.')
+        n = st.number_input('Faiz üçün hər komandanın son neçə oyununa baxılsın?', min_value=1, max_value=100, value=10, step=1, key='p_n')
+        # Hədlər aşağıdakı qutuda dəyişdirilir; burada session_state-dən oxunur ("➕" düyməsi aşağı itməsin deyə qutu ən sonda göstərilir)
         thr = tuple(int(st.session_state.get(f'p_thr_{i}', d)) for i, d in enumerate(_PCT_DEF))
         cat = _pct_catalog(thr)
         chosen = [x for x in st.session_state.get('p_flt', []) if x in cat]
@@ -1953,7 +1947,7 @@ def render_pct_page():
                 a1.selectbox('Filtr seç', free, key='p_add_sel', label_visibility='collapsed', format_func=lambda x: _pct_label(x, thr))
                 a2.button('➕', key='p_add_btn', on_click=_pct_add, use_container_width=True, help='Seçilmiş filtri əlavə et')
         if not chosen:
-            st.caption('Siyahıdan filtr seç və ➕ düyməsinə bas. Bir neçə filtr əlavə etsən, hamısı eyni oyunda tutmalıdır.')
+            st.caption('Faiz cədvəli istəmirsənsə, burada filtr seçmə. İstəsən siyahıdan filtr seç və ➕ düyməsinə bas; bir neçə filtr əlavə etsən, hamısı eyni oyunda tutmalıdır.')
         for i, nm in enumerate(chosen):
             with st.container(key=f'pct_fl_{i}'):
                 r1, r2 = st.columns([1, 1])
@@ -1967,28 +1961,34 @@ def render_pct_page():
                     _a.number_input(nm, 0, 60, d, key=f'p_thr_{i}')
                     _b.button('＋ Filtr', key=f'p_thradd_{i}', on_click=_pct_add_named, args=(nm,), use_container_width=True,
                               help='Bu həddi filtr kimi əlavə et')
+    return int(n), list(chosen), thr
 
-    g = _pct_games(st.session_state['p_date'], need_stats=any(x in _PCT_STAT for x in chosen))
+
+def compute_pct(d_from, d_to, sel_leagues, all_leagues, n, chosen, thr):
+    """Seçilmiş tarix aralığındakı oyunlar üçün faiz cədvəlini hesablayır (analiz düyməsi basılanda bir dəfə)."""
+    days = list(pd.date_range(pd.Timestamp(d_from).normalize(), pd.Timestamp(d_to).normalize(), freq='D'))
+    truncated = len(days) > _PCT_MAX_DAYS
+    days = days[:_PCT_MAX_DAYS]
+    need = any(x in _PCT_STAT for x in chosen)
+    parts = []
+    for d in days:
+        gd = _pct_games(d, need_stats=need)
+        if gd.empty:
+            continue
+        gd = gd.copy()
+        gd['_day'] = d
+        parts.append(gd)
+    if not parts:
+        return {'status': 'no_games'}
+    g = pd.concat(parts, ignore_index=True)
+    if not all_leagues:
+        g = g[g['league'].astype(str).isin(set(sel_leagues))].reset_index(drop=True)
     if g.empty:
-        st.info('Bu tarixdə bazada oyun yoxdur. Başqa gün seç və ya əsas səhifədən məlumatı yenilə.')
-        return
-    leagues = sorted(g['league'].dropna().astype(str).unique())
-    with st.expander(f'🏆 Liqa seçimi ({len(leagues)} liqa, boş = hamısı)', expanded=False):
-        sel = st.multiselect('Liqalar', leagues, key='p_leagues')
-    if sel:
-        g = g[g['league'].astype(str).isin(sel)].reset_index(drop=True)
-
+        return {'status': 'no_games'}
+    g['_day'] = pd.to_datetime(g['_day'])
     tm = g['time'].astype(str).replace({'nan': '', 'NaT': '', 'None': ''})
-    if not chosen:
-        st.caption(f'Bu gün {len(g)} oyun var. Faizi görmək üçün yuxarıdan ən azı bir filtr əlavə et.')
-        show = pd.DataFrame({'Saat': tm, 'Liqa': g['league'], 'Ev sahibi': g['home'], 'Qonaq': g['away'],
-                             '1-ci hissə': _pct_score(g['ht_home'], g['ht_away']),
-                             'Hesab': _pct_score(g['ft_home'], g['ft_away'])}).sort_values('Saat')
-        st.dataframe(show, hide_index=True, use_container_width=True, height=40 + 35 * len(show))
-        return
-
     H = _pct_history(results, tuple(chosen), thr, (len(results), str(results['date'].max())))
-    day = np.full(len(g), pd.Timestamp(st.session_state['p_date']).normalize().to_datetime64().astype('datetime64[D]').astype('int64'))
+    day = g['_day'].values.astype('datetime64[D]').astype('int64')
     hh, hd, hp = _pct_for(H, g['home_k'].values, day, int(n))
     ah, ad, ap = _pct_for(H, g['away_k'].values, day, int(n))
     cnt = (~np.isnan(hp)).astype(int) + (~np.isnan(ap)).astype(int)
@@ -1997,11 +1997,12 @@ def render_pct_page():
     complete = (hd >= int(n)) & (ad >= int(n))
     fmt = lambda h, d, p: [f'{a}/{b} ({q:.0f}%)' if b else '—' for a, b, q in zip(h, d, p)]
     out = pd.DataFrame({
-        'Saat': tm, 'Ev sahibi': g['home'], 'Qonaq': g['away'],
+        'Tarix': g['_day'].dt.strftime('%d.%m').values, 'Saat': tm.values,
+        'Ev sahibi': g['home'].values, 'Qonaq': g['away'].values,
         '1-ci hissə': _pct_score(g['ht_home'], g['ht_away']),
         'Hesab': _pct_score(g['ft_home'], g['ft_away']),
     })
-    # Seçilmiş künc / zərbə / dəqiq zərbə filtrləri üçün hesabdan sonra: Ev-Qonaq (cəm), məs. 7-5 (12)
+    # Seçilmiş künc / zərbə / dəqiq zərbə filtrləri üçün: Ev-Qonaq (cəm), məs. 7-5 (12)
     _seen = set()
     for _nm in chosen:
         if _nm not in _PCT_STAT:
@@ -2018,36 +2019,73 @@ def render_pct_page():
     out['Məlumat'] = np.where(complete, '✓ tam', '⚠️ kəsik')
     out['Liqa'] = g['league'].values
     out['_tam'] = complete.astype(int)
+    out['_dt'] = g['_day'].values
+    out = out.sort_values(['_tam', 'Orta %', '_dt', 'Saat'], ascending=[False, False, True, True], na_position='last', kind='stable').reset_index(drop=True)
+    return {'status': 'ok', 'out': out, 'labels': ' + '.join(_pct_label(x, thr) for x in chosen), 'n': int(n),
+            'truncated': truncated, 'multi': len(days) > 1, 'd_from': str(d_from), 'd_to': str(d_to)}
+
+
+def _pct_table_html(out, multi_day):
+    """Yan sürüşdürmə işləyən HTML cədvəl: 'Oyun' sütunu solda sabit, əsas göstəricilər (Orta %, Ev, Qonaq) ondan dərhal sonra gəlir."""
+    import html as _h
+    e = lambda v: _h.escape('' if v is None else str(v))
+    extra = [c for c in ('Künc', 'Dəqiq zərbə', 'Zərbə') if c in out.columns]
+    cols = ['Orta %', 'Ev faizi', 'Qonaq faizi', '1-ci hissə', 'Hesab'] + extra + ['Məlumat', 'Liqa']
+    head = '<tr><th class="g">Oyun</th>' + ''.join(f'<th>{e(c)}</th>' for c in cols) + '</tr>'
+    rows = []
+    for r in out.to_dict('records'):
+        tm = str(r.get('Saat') or '').strip()
+        top = ((str(r['Tarix']) + ' · ') if multi_day else '') + tm
+        cells = [f'<td class="g"><div class="tm">{e(top) or "&nbsp;"}</div><div class="tn">{e(r["Ev sahibi"])}</div><div class="tn">{e(r["Qonaq"])}</div></td>']
+        for c in cols:
+            v = r.get(c)
+            if c == 'Orta %':
+                if v is None or (isinstance(v, float) and np.isnan(v)):
+                    cells.append('<td>—</td>')
+                else:
+                    cls = 'hi' if v >= 80 else ('mid' if v >= 60 else 'lo')
+                    cells.append(f'<td><span class="pb {cls}">{v:.0f}%</span></td>')
+            else:
+                cells.append(f'<td>{e(v)}</td>')
+        rows.append(f'<tr class="{"" if r.get("_tam") else "part"}">' + ''.join(cells) + '</tr>')
+    return '<div class="pct-wrap"><table class="pct"><thead>' + head + '</thead><tbody>' + ''.join(rows) + '</tbody></table></div>'
+
+
+def render_pct_result(P, cur_key):
+    st.subheader('📈 Faiz cədvəli')
+    if P.get('key') != cur_key:
+        st.warning('Filtrlər və ya tarix dəyişib — göstərilən cədvəl əvvəlki seçimlərə aiddir. Yenisi üçün "Oyunları analiz et" düyməsinə bas.')
+    if P.get('status') != 'ok':
+        st.info('Seçilmiş tarix və liqalarda bazada oyun yoxdur. Tarixi dəyiş və ya məlumatı yenilə.')
+        return
+    out = P['out'].copy()
     min_pct = st.slider('Minimum orta faiz', 0, 100, 0, step=5, key='p_min')
     if min_pct > 0:
         out = out[out['Orta %'] >= min_pct]
-    out = out.sort_values(['_tam', 'Orta %', 'Saat'], ascending=[False, False, True], na_position='last', kind='stable')
     n_full = int(out['_tam'].sum())
-    out = out.drop(columns=['_tam'])
     for _nm_, _k_ in (('API-Football', '_apif_err'), ('football-data.org', '_fd_err')):
         _ae = st.session_state.get(_k_)
         if _ae and _ae != 'açar yoxdur':
             st.caption(f'⚠️ {_nm_}: {_ae}')
-    labels = ' + '.join(_pct_label(x, thr) for x in chosen)
     top = out['Orta %'].max() if len(out) else np.nan
-    st.markdown(f'**Seçilmiş filtr:** {labels} · **Son oyun sayı:** {int(n)} · **Siyahıda:** {len(out)} oyun'
+    st.markdown(f"**Seçilmiş filtr:** {P['labels']} · **Son oyun sayı:** {P['n']} · **Siyahıda:** {len(out)} oyun"
                 + (f' · ən yüksək: **{top:.0f}%**' if pd.notna(top) else ''))
+    if P.get('truncated'):
+        st.caption(f'⚠️ Faiz cədvəli üçün tarix aralığının ilk {_PCT_MAX_DAYS} günü hesablandı.')
     if len(out) > n_full:
         st.caption(f'{len(out) - n_full} oyunun məlumatı kəsikdir (komandanın statistikası olan əvvəlki oyunları N-dən azdır). Onlar siyahının sonundadır.')
     if out.empty:
         st.info('Bu şərtlərə uyğun oyun yoxdur. Minimum faizi azalt.')
         return
-    st.dataframe(out, hide_index=True, use_container_width=True, height=40 + 35 * len(out),
-                 column_config={'Orta %': st.column_config.NumberColumn('Orta %', format='%.0f%%')})
-    st.caption('Ev / Qonaq faizi: komandanın son oyunlarında filtrlərin tutduğu say (məs. 8/10 = 80%). Filtr üçün statistikası olmayan oyunlar keçilir: baxılan oyunlar statistikası olan son N oyundur. '
-               '"Klub" filtrində hər klubun öz göstəricisi yoxlanılır.')
-    st.download_button('⬇️ Siyahını CSV yüklə', out.to_csv(index=False).encode('utf-8-sig'),
-                       file_name=f"faiz_{st.session_state['p_date']:%Y-%m-%d}.csv", mime='text/csv', key='p_csv')
+    st.markdown(_pct_table_html(out, P.get('multi', False)), unsafe_allow_html=True)
+    st.caption('↔ Cədvəli barmaqla (və ya siçanla) yana sürüşdürə bilərsən; "Oyun" sütunu solda sabit qalır. '
+               'Ev / Qonaq faizi: komandanın son oyunlarında filtrlərin tutduğu say (məs. 8/10 = 80%). '
+               'Filtr üçün statistikası olmayan oyunlar keçilir: baxılan oyunlar statistikası olan son N oyundur. "Klub" filtrində hər klubun öz göstəricisi yoxlanılır.')
+    csv_out = out.drop(columns=['_tam', '_dt'], errors='ignore')
+    st.download_button('⬇️ Faiz cədvəlini CSV yüklə', csv_out.to_csv(index=False).encode('utf-8-sig'),
+                       file_name=f"faiz_{P['d_from']}_{P['d_to']}.csv", mime='text/csv', key='p_csv')
 
 
-if st.session_state.get('view_page') == 'pct':
-    render_pct_page()
-    st.stop()
 # ======================= FAİZ SƏHİFƏSİ (son) =======================
 
 
@@ -2333,6 +2371,8 @@ with st.container(border=True):
         min_target_club = st.number_input('Hər klub üçün dəqiq zərbə', min_value=0, max_value=20, value=4, step=1, disabled=not target_club_on, key='min_target_club')
     st.markdown('<div class="rule">Hər komandanın seçilən son oyunlarının <b>HAMISI</b> bütün şərtlərə uyğun olmalıdır. Ev/səfər filtrlərində isə yalnız klubun evdəki (və ya səfərdəki) son oyunlarına baxılır.</div>', unsafe_allow_html=True)
 
+_pct_n, _pct_chosen, _pct_thr = render_pct_filters()
+
 criteria_selected = any([
     btts, btts_no, ht05_under, ht15_under, ht_draw, under25,
     match_goal_15, match_goal_25, match_goal_35, match_goal_45,
@@ -2360,8 +2400,8 @@ def save_filters():
 
 
 save_filters()
-if not criteria_selected:
-    st.info('Ən azı bir filtr seç. Tarixə uyğun oyunlar aşağıda görünür, analiz üçün isə filtr lazımdır.')
+if not criteria_selected and not _pct_chosen:
+    st.info('Ən azı bir filtr seç (2-ci bölmədə analiz filtri və/və ya 3-cü bölmədə faiz filtri). Analiz üçün filtr lazımdır.')
 
 
 def _num(df, col):
@@ -3034,34 +3074,56 @@ run_clicked = st.button('🔎 Oyunları analiz et', type='primary', key='analyze
 cur_key = (tuple(n for n, _ in active_conditions()) if criteria_selected else (), int(n_games), str(date_from), str(date_to),
            len(sel_leagues), len(results), str(results['date'].max()))
 
-# Analiz yalnız istifadəçi düyməni basanda işə düşür.
+cur_pct_key = (tuple(_pct_chosen), _pct_thr, int(_pct_n), str(date_from), str(date_to),
+               len(sel_leagues), len(results), str(results['date'].max()))
+
+# Analiz yalnız istifadəçi düyməni basanda işə düşür: həm faiz cədvəli, həm uyğun oyunlar hesablanır.
 if run_clicked:
     problem = None
     if date_from > date_to:
         problem = ('error', 'Başlanğıc tarixi son tarixdən böyük ola bilməz.')
-    elif not criteria_selected:
-        problem = ('warning', 'Zəhmət olmasa ən azı bir filtr seç.')
-    elif conditions_contradict():
+    elif not criteria_selected and not _pct_chosen:
+        problem = ('warning', 'Zəhmət olmasa ən azı bir filtr seç (2-ci bölmədə analiz filtri və/və ya 3-cü bölmədə faiz filtri).')
+    elif criteria_selected and conditions_contradict():
         problem = ('warning', 'Seçilmiş filtrlər bir-birinə ziddir (məsələn "2.5 üst" və "2.5 alt"), heç bir oyun uyğun gəlməyəcək. Filtrləri dəyiş.')
     elif not sel_leagues:
         problem = ('warning', 'Heç bir liqa seçilməyib. "Liqalar" bölməsindən ən azı bir liqa seç.')
     if problem:
         st.session_state.pop('analysis', None)
+        st.session_state.pop('pct_result', None)
         getattr(st, problem[0])(problem[1])
     else:
         st.session_state['_ran'] = True
         save_filters()
         import time as _t
-        _t0 = _t.perf_counter()
-        with st.spinner('Analiz edilir...'):
-            _A = analyze(int(n_games), date_from, date_to, sel_leagues, len(sel_leagues) >= len(league_options))
-        if _A is None:
-            st.session_state.pop('analysis', None)
-            st.warning('Bu tarix aralığında bazada oyun tapılmadı. Məlumatı yeniləməyi yoxla.')
+        _all_lg = len(sel_leagues) >= len(league_options)
+        # 1) Faiz cədvəli (varsa) — nəticədə analizdən əvvəl göstərilir
+        if _pct_chosen:
+            with st.spinner('Faizlər hesablanır...'):
+                _P = compute_pct(date_from, date_to, sel_leagues, _all_lg, _pct_n, _pct_chosen, _pct_thr)
+            _P['key'] = cur_pct_key
+            st.session_state['pct_result'] = _P
         else:
-            _A['key'], _A['secs'] = cur_key, _t.perf_counter() - _t0
-            st.session_state['analysis'] = _A
-            st.session_state['show_n'] = SHOW_STEP
+            st.session_state.pop('pct_result', None)
+        # 2) Uyğun oyunlar analizi (2-ci bölmədə filtr seçilibsə)
+        if criteria_selected:
+            _t0 = _t.perf_counter()
+            with st.spinner('Analiz edilir...'):
+                _A = analyze(int(n_games), date_from, date_to, sel_leagues, _all_lg)
+            if _A is None:
+                st.session_state.pop('analysis', None)
+                st.warning('Bu tarix aralığında bazada oyun tapılmadı. Məlumatı yeniləməyi yoxla.')
+            else:
+                _A['key'], _A['secs'] = cur_key, _t.perf_counter() - _t0
+                st.session_state['analysis'] = _A
+                st.session_state['show_n'] = SHOW_STEP
+        else:
+            st.session_state.pop('analysis', None)
+
+if st.session_state.get('pct_result'):
+    render_pct_result(st.session_state['pct_result'], cur_pct_key)
+    if st.session_state.get('analysis'):
+        st.divider()
 
 if st.session_state.get('analysis'):
     render_analysis(st.session_state['analysis'], cur_key)
