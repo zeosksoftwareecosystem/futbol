@@ -1539,7 +1539,7 @@ def _pct_label(nm, thr):
 
 @st.cache_data(show_spinner='Faizlər hesablanır...', max_entries=12)
 def _pct_history(_res, names, thr, sig):
-    cat = _pct_catalog(thr)
+    cat = {**_pct_catalog(thr), **dict(active_conditions())}
     ok_h = pd.Series(True, index=_res.index)
     ok_a = pd.Series(True, index=_res.index)
     has_all = pd.Series(True, index=_res.index)
@@ -1933,7 +1933,7 @@ def render_pct_filters():
     with st.container(border=True):
         st.markdown('<div class="sec">3 · Faiz filtrləri</div>', unsafe_allow_html=True)
         st.caption('Hər komandanın son N oyununda bu filtrlərin neçə dəfə tutduğu faizlə göstərilir (məsələn 10 oyundan 8 → 80%). '
-                   'Tarix aralığı və liqalar yuxarıdakı 1-ci bölmədən götürülür.')
+                   'Tarix aralığı və liqalar yuxarıdakı 1-ci bölmədən götürülür. 2-ci bölmədəki filtrlər avtomatik faizə də tətbiq olunur.')
         n = st.number_input('Faiz üçün hər komandanın son neçə oyununa baxılsın?', min_value=1, max_value=100, value=10, step=1, key='p_n')
         # Hədlər aşağıdakı qutuda dəyişdirilir; burada session_state-dən oxunur ("➕" düyməsi aşağı itməsin deyə qutu ən sonda göstərilir)
         thr = tuple(int(st.session_state.get(f'p_thr_{i}', d)) for i, d in enumerate(_PCT_DEF))
@@ -1964,12 +1964,23 @@ def render_pct_filters():
     return int(n), list(chosen), thr
 
 
+def _pct_stat_key(nm):
+    if 'künc' in nm:
+        return 'künc'
+    if 'dəqiq' in nm:
+        return 'dəqiq zərbə'
+    if 'zərbə' in nm:
+        return 'zərbə'
+    return None
+
+
 def compute_pct(d_from, d_to, sel_leagues, all_leagues, n, chosen, thr):
     """Seçilmiş tarix aralığındakı oyunlar üçün faiz cədvəlini hesablayır (analiz düyməsi basılanda bir dəfə)."""
+    chosen = list(dict.fromkeys([n_ for n_, _ in active_conditions()] + list(chosen)))
     days = list(pd.date_range(pd.Timestamp(d_from).normalize(), pd.Timestamp(d_to).normalize(), freq='D'))
     truncated = len(days) > _PCT_MAX_DAYS
     days = days[:_PCT_MAX_DAYS]
-    need = any(x in _PCT_STAT for x in chosen)
+    need = any(_pct_stat_key(x) for x in chosen)
     parts = []
     for d in days:
         gd = _pct_games(d, need_stats=need)
@@ -2005,10 +2016,8 @@ def compute_pct(d_from, d_to, sel_leagues, all_leagues, n, chosen, thr):
     # Seçilmiş künc / zərbə / dəqiq zərbə filtrləri üçün: Ev-Qonaq (cəm), məs. 7-5 (12)
     _seen = set()
     for _nm in chosen:
-        if _nm not in _PCT_STAT:
-            continue
-        _k = 'künc' if 'künc' in _nm else ('dəqiq zərbə' if 'dəqiq' in _nm else 'zərbə')
-        if _k in _seen:
+        _k = _pct_stat_key(_nm)
+        if not _k or _k in _seen:
             continue
         _seen.add(_k)
         _col, _ch, _ca = _PCT_STAT_COLS[_k]
@@ -3074,7 +3083,7 @@ run_clicked = st.button('🔎 Oyunları analiz et', type='primary', key='analyze
 cur_key = (tuple(n for n, _ in active_conditions()) if criteria_selected else (), int(n_games), str(date_from), str(date_to),
            len(sel_leagues), len(results), str(results['date'].max()))
 
-cur_pct_key = (tuple(_pct_chosen), _pct_thr, int(_pct_n), str(date_from), str(date_to),
+cur_pct_key = (tuple(n for n, _ in active_conditions()) + tuple(_pct_chosen), _pct_thr, int(_pct_n), str(date_from), str(date_to),
                len(sel_leagues), len(results), str(results['date'].max()))
 
 # Analiz yalnız istifadəçi düyməni basanda işə düşür: həm faiz cədvəli, həm uyğun oyunlar hesablanır.
@@ -3098,7 +3107,7 @@ if run_clicked:
         import time as _t
         _all_lg = len(sel_leagues) >= len(league_options)
         # 1) Faiz cədvəli (varsa) — nəticədə analizdən əvvəl göstərilir
-        if _pct_chosen:
+        if _pct_chosen or criteria_selected:
             with st.spinner('Faizlər hesablanır...'):
                 _P = compute_pct(date_from, date_to, sel_leagues, _all_lg, _pct_n, _pct_chosen, _pct_thr)
             _P['key'] = cur_pct_key
