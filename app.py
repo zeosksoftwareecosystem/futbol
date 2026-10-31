@@ -4291,10 +4291,25 @@ def _ad_search_target(frame, target, min_support, min_train_rate, max_filters):
 
 
 def _ad_run(day_from, day_to, leagues, all_leagues, min_support, min_train_rate, max_filters, max_games):
+    """Axtarış nəticəsi və diaqnostika qaytarır; hədəf tarixləri ilə təlim tarixçəsini ayırır."""
     cat, _ = _ah_catalog()
-    hist = _ad_history_frame(results, (len(results), str(results['date'].max()), 'auto-discovery-v2'))
+    hist = _ad_history_frame(results, (len(results), str(results['date'].max()), 'auto-discovery-v3'))
     if hist.empty:
-        return []
+        return {'recommendations': [], 'diagnostics': {'history_rows': 0, 'history_from': None,
+                'history_to': None, 'eligible_targets': 0, 'patterns_found': 0,
+                'candidate_games': 0, 'reason': 'Tarixi nəticə bazası boşdur.'}}
+    if not all_leagues:
+        hist = hist[hist['league'].astype(str).isin(set(map(str, leagues)))].copy()
+    hist_dates = pd.to_datetime(hist['date'], errors='coerce').dropna()
+    diagnostics = {
+        'history_rows': int(len(hist)),
+        'history_from': str(hist_dates.min().date()) if not hist_dates.empty else None,
+        'history_to': str(hist_dates.max().date()) if not hist_dates.empty else None,
+        'eligible_targets': 0, 'patterns_found': 0, 'candidate_games': 0, 'reason': ''
+    }
+    if hist.empty:
+        diagnostics['reason'] = 'Seçilmiş liqalarda istifadə edilə bilən tarixi oyun yoxdur.'
+        return {'recommendations': [], 'diagnostics': diagnostics}
     targets = {}
     for nm in cat:
         if 'zərbə' in nm or 'dəqiq zərbə' in nm:
@@ -4312,17 +4327,22 @@ def _ad_run(day_from, day_to, leagues, all_leagues, min_support, min_train_rate,
                 targets.setdefault(group, []).append((nm, side, target))
     # Hər bazar üçün kombinasiya yalnız bir dəfə axtarılır.
     patterns = {}
+    diagnostics['eligible_targets'] = int(sum(len(v) for v in targets.values()))
     for group, defs in targets.items():
         for nm, side, target in defs:
             pat = _ad_search_target(hist, target, min_support, min_train_rate, max_filters)
             if pat:
                 patterns[(group, nm, side)] = pat[0]
+    diagnostics['patterns_found'] = int(len(patterns))
     games = _ah_games(day_from, day_to, leagues, all_leagues)
     if games.empty:
-        return []
+        diagnostics['reason'] = 'Seçilmiş tarix aralığında qarşıdakı oyun tapılmadı.'
+        return {'recommendations': [], 'diagnostics': diagnostics}
     games = games[games['ft_home'].isna() | games['ft_away'].isna()].head(max_games)
     if games.empty:
-        return []
+        diagnostics['reason'] = 'Seçilmiş tarix aralığında hələ başlamamış oyun yoxdur.'
+        return {'recommendations': [], 'diagnostics': diagnostics}
+    diagnostics['candidate_games'] = int(len(games))
     predictor_names = [n for n in cat if 'zərbə' not in n and 'dəqiq zərbə' not in n]
     output = []
     for _, g in games.iterrows():
@@ -4350,36 +4370,91 @@ def _ad_run(day_from, day_to, leagues, all_leagues, min_support, min_train_rate,
                            'complexity': len(pat['combo'])})
     output.sort(key=lambda x: (-(x['pattern']['test'][0] / x['pattern']['test'][1]),
                                -x['pattern']['test'][1], x['complexity']))
-    return output
+    if not output:
+        if diagnostics['patterns_found'] == 0:
+            diagnostics['reason'] = ('Tarixi oyunlarda minimum nümunə sayı və 100% validation + müstəqil test '
+                                     'şərtlərini eyni vaxtda ödəyən filtr kombinasiyası tapılmadı.')
+        else:
+            diagnostics['reason'] = 'Təsdiqlənmiş kombinasiya var, amma seçilmiş tarixlərdəki gələcək oyunlardan heç biri ona uyğun gəlmədi.'
+    else:
+        diagnostics['reason'] = 'Uyğun gələcək oyunlar tapıldı.'
+    return {'recommendations': output, 'diagnostics': diagnostics}
 
 
 def _ad_ui(day_from, day_to, sel_leagues, all_leagues):
     st.divider()
     st.subheader('🧠 Avtomatik filtr kəşfiyyatı')
-    st.caption('Bu bölmə mövcud filtrlərdən ayrıdır. Sistem özü 1–4 şərtli kombinasiyaları axtarır, sonra onları xronoloji ayrılmış validation və test oyunlarında yoxlayır. Yalnız hər iki yoxlamada 100% nəticə verən kombinasiya namizəd kimi göstərilir.')
+    st.caption('Bu bölmə əsas analiz tarixindən ayrıdır. Sistem özü 1–4 şərtli kombinasiyaları axtarır, onları xronoloji validation və müstəqil testdə yoxlayır. Yalnız hər iki hissədə 100% nəticə verən kombinasiya namizəd kimi göstərilir.')
+
+    # Bu bölmənin öz hədəf tarixləri var; əsas səhifədəki tarix seçiminə bağlı deyil.
+    _ad_today = baku_today()
+    st.session_state.setdefault('ad_day_from', _ad_today)
+    st.session_state.setdefault('ad_day_to', _ad_today + timedelta(days=7))
+    d1, d2 = st.columns(2)
+    with d1:
+        ad_day_from = st.date_input('Axtarılacaq oyunların başlanğıc tarixi', key='ad_day_from')
+    with d2:
+        ad_day_to = st.date_input('Axtarılacaq oyunların son tarixi', key='ad_day_to')
+
+    _hist_dates = pd.to_datetime(results.get('date', pd.Series(dtype='datetime64[ns]')), errors='coerce').dropna()
+    _hist_view = results.copy()
+    if not all_leagues:
+        _hist_view = _hist_view[_hist_view['league'].astype(str).isin(set(map(str, sel_leagues)))]
+    _required_hist_cols = ['date', 'home_k', 'away_k', 'ft_home', 'ft_away']
+    if all(c in _hist_view.columns for c in _required_hist_cols):
+        _hist_view = _hist_view.dropna(subset=_required_hist_cols)
+    _hist_view_dates = pd.to_datetime(_hist_view.get('date', pd.Series(dtype='datetime64[ns]')), errors='coerce').dropna()
+    _hmin = str(_hist_view_dates.min().date()) if not _hist_view_dates.empty else 'yoxdur'
+    _hmax = str(_hist_view_dates.max().date()) if not _hist_view_dates.empty else 'yoxdur'
+    _hcount = int(len(_hist_view))
+    st.markdown('**Tarixi məlumat bazası**')
+    m1, m2, m3 = st.columns(3)
+    m1.metric('Tarixi oyun sayı', f'{_hcount:,}'.replace(',', ' '))
+    m2.metric('İlk nəticə tarixi', _hmin)
+    m3.metric('Son nəticə tarixi', _hmax)
+    if not _hist_dates.empty:
+        st.caption(f'Bütün liqalar üzrə baza: {_hist_dates.min().date()} – {_hist_dates.max().date()}. Yuxarıdakı say və tarixlər seçilmiş liqalara aiddir.')
+
     c1, c2, c3, c4 = st.columns(4)
     min_support = int(c1.number_input('Hər yoxlama hissəsində minimum oyun', 5, 100, 30, step=5, key='ad_support'))
     min_train_rate = c2.number_input('Təlimdə minimum tutma %', 70, 100, 90, step=5, key='ad_train_rate') / 100
     max_filters = int(c3.selectbox('Maksimum filtr sayı', [1, 2, 3, 4], index=3, key='ad_max_filters'))
     max_games = int(c4.number_input('Yoxlanacaq gələcək oyun', 10, 300, 100, step=10, key='ad_max_games'))
-    st.caption('Tarix bölgüsü: 60% öyrənmə · 20% təsdiq · 20% müstəqil test. Filtr kombinasiyalarının daxili adları nəticə cədvəlində göstərilmir.')
+    st.caption('Tarix bölgüsü: 60% öyrənmə · 20% təsdiq · 20% müstəqil test. Hədəf oyun tarixləri yuxarıdan ayrıca seçilir. Filtrlərin daxili adları gizli saxlanılır.')
     if st.button('🔬 Avtomatik axtarışı başlat', key='ad_run', type='primary', use_container_width=True):
-        with st.spinner('Tarixi oyunlar hazırlanır, filtr kombinasiyaları yoxlanır...'):
-            try:
-                found = _ad_run(day_from, day_to, sel_leagues, all_leagues,
-                                min_support, min_train_rate, max_filters, max_games)
-                st.session_state['ad_result'] = found
-                st.session_state['ad_key'] = (str(day_from), str(day_to), min_support, min_train_rate, max_filters, max_games,
-                                              len(results), str(results['date'].max()))
-            except Exception as e:
-                st.error(f'Avtomatik axtarış zamanı xəta: {e}')
-                st.session_state.pop('ad_result', None)
-    found = st.session_state.get('ad_result')
-    if found is None:
-        st.info('Axtarışı başlatdıqdan sonra yalnız müstəqil testdən keçən namizədlər burada görünəcək.')
+        if ad_day_from > ad_day_to:
+            st.error('Başlanğıc tarixi son tarixdən böyük ola bilməz.')
+            st.session_state.pop('ad_result', None)
+        else:
+            with st.spinner('Tarixi oyunlar hazırlanır, filtr kombinasiyaları yoxlanır...'):
+                try:
+                    result = _ad_run(ad_day_from, ad_day_to, sel_leagues, all_leagues,
+                                     min_support, min_train_rate, max_filters, max_games)
+                    st.session_state['ad_result'] = result
+                    st.session_state['ad_key'] = (str(ad_day_from), str(ad_day_to), min_support, min_train_rate, max_filters, max_games,
+                                                  len(results), str(results['date'].max()))
+                except Exception as e:
+                    st.error(f'Avtomatik axtarış zamanı xəta: {e}')
+                    st.session_state.pop('ad_result', None)
+    result = st.session_state.get('ad_result')
+    if result is None:
+        st.info(f'Axtarış hələ başladılmayıb. Hədəf tarix aralığı: {ad_day_from} – {ad_day_to}.')
         return
+    # Köhnə sessiyadakı list nəticələrinə də uyğunluq üçün təhlükəsiz oxu.
+    if isinstance(result, dict):
+        found = result.get('recommendations', [])
+        diag = result.get('diagnostics', {})
+    else:
+        found, diag = result, {}
+    st.markdown('**Bu axtarışın diaqnostikası**')
+    q1, q2, q3, q4 = st.columns(4)
+    q1.metric('Öyrənmə üçün tarixi oyun', f"{diag.get('history_rows', 0):,}".replace(',', ' '))
+    q2.metric('Yoxlanmış bazar hədəfi', str(diag.get('eligible_targets', 0)))
+    q3.metric('Təsdiqlənmiş kombinasiya', str(diag.get('patterns_found', 0)))
+    q4.metric('Gələcək oyun', str(diag.get('candidate_games', 0)))
+    st.caption(f"Tarixi təlim aralığı: {diag.get('history_from') or 'yoxdur'} – {diag.get('history_to') or 'yoxdur'} · Hədəf oyun aralığı: {ad_day_from} – {ad_day_to}")
     if not found:
-        st.warning('Bu tarix aralığında 100% validation və 100% müstəqil test şərtini ödəyən kombinasiya tapılmadı. Bu halda sistem məsləhət vermir.')
+        st.warning('Tövsiyə tapılmadı. ' + str(diag.get('reason') or '100% validation və müstəqil test şərtini ödəyən kombinasiya yoxdur.'))
         return
     st.success(f'{len(found)} təsdiqlənmiş oyun/bazar namizədi tapıldı.')
     for item in found:
