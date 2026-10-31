@@ -5782,247 +5782,408 @@ with st.container(border=True, key='match_intelligence_section'):
 
 
 # =====================================================================================
-# 📊 HISTORICAL BACKTEST — ayrıca geriyə dönük model yoxlaması
-# Mövcud MATCH INTELLIGENCE və əsas filtrlərdən ayrıdır. Yalnız results bazasını oxuyur.
+# ⚡ LIVE MATCH MOMENTUM SCANNER — SofaScore live statistics
+# Separate live module. Does not alter existing filters, historical analysis or results.
+# Note: SofaScore does not publish an official public developer API; these are
+# undocumented web endpoints and may be rate-limited or changed upstream.
 # =====================================================================================
-def _hbt_safe_num(series):
-    return pd.to_numeric(series, errors="coerce")
+SOFASCORE_BASE = "https://www.sofascore.com/api/v1"
+SOFASCORE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36",
+    "Referer": "https://www.sofascore.com/",
+    "Accept": "application/json, text/plain, */*",
+}
 
 
-def _hbt_history(team_key, match_day, n_last):
-    if results.empty or not team_key:
-        return results.iloc[0:0].copy()
-    dts = pd.to_datetime(results["date"], errors="coerce")
-    before = results.loc[dts < pd.Timestamp(match_day)]
-    mask = (before["home_k"].astype(str) == str(team_key)) | (before["away_k"].astype(str) == str(team_key))
-    return before.loc[mask].sort_values("date", ascending=False).head(int(n_last))
+def _ss_get(path, timeout=12):
+    """SofaScore web endpoint. Returns (JSON, error)."""
+    try:
+        response = requests.get(
+            f"{SOFASCORE_BASE}/{path.lstrip('/')}",
+            headers=SOFASCORE_HEADERS,
+            timeout=timeout,
+        )
+        if response.status_code != 200:
+            return None, f"HTTP {response.status_code}"
+        payload = response.json()
+        if not isinstance(payload, dict):
+            return None, "JSON formatı gözlənilən kimi deyil"
+        return payload, None
+    except requests.RequestException as exc:
+        return None, f"{type(exc).__name__}: {str(exc)[:140]}"
+    except ValueError:
+        return None, "JSON oxunmadı"
 
 
-def _hbt_rate(history, team_key, market, line, prior_rate):
-    if history.empty:
-        return None, 0
-    if market == "Qol":
-        a = _hbt_safe_num(history.get("ft_home", pd.Series(index=history.index, dtype=float)))
-        b = _hbt_safe_num(history.get("ft_away", pd.Series(index=history.index, dtype=float)))
-    else:
-        a = _hbt_safe_num(history.get("home_corners", pd.Series(index=history.index, dtype=float)))
-        b = _hbt_safe_num(history.get("away_corners", pd.Series(index=history.index, dtype=float)))
-        a = a.where(a.between(0, 30))
-        b = b.where(b.between(0, 30))
-    totals = (a + b).dropna()
-    count = int(len(totals))
-    if count == 0:
-        return None, 0
-    hits = int((totals > float(line)).sum())
-    # Sadə Bayes hamarlaması: kiçik nümunələrdə faizin həddən artıq dəyişməsinin qarşısı.
-    p_over = (hits + 3.0 * float(prior_rate)) / (count + 3.0)
-    return float(min(0.995, max(0.005, p_over))), count
+def _ss_numeric(value):
+    """Converts SofaScore display/raw values to float; missing remains NaN."""
+    if value is None:
+        return np.nan
+    if isinstance(value, (int, float)):
+        return float(value)
+    raw = str(value).strip().replace("%", "").replace(",", ".")
+    if not raw or raw in {"-", "—", "N/A"}:
+        return np.nan
+    # Possession/pass displays may be '12/18 (67%)'; use the first number.
+    match = re.search(r"-?\d+(?:\.\d+)?", raw)
+    return float(match.group(0)) if match else np.nan
 
 
-def _hbt_prior(before, market, line):
-    if before.empty:
-        return 0.50
-    if market == "Qol":
-        a = _hbt_safe_num(before.get("ft_home", pd.Series(dtype=float)))
-        b = _hbt_safe_num(before.get("ft_away", pd.Series(dtype=float)))
-    else:
-        a = _hbt_safe_num(before.get("home_corners", pd.Series(dtype=float)))
-        b = _hbt_safe_num(before.get("away_corners", pd.Series(dtype=float)))
-        a = a.where(a.between(0, 30))
-        b = b.where(b.between(0, 30))
-    total = (a + b).dropna()
-    if len(total) < 10:
-        return 0.50
-    return float((total > float(line)).mean())
+def _ss_live_minute(event, event_time, status):
+    """Best-effort live minute from SofaScore period clock; no fabricated minute."""
+    description = str(status.get("description") or "")
+    period_start = event_time.get("currentPeriodStartTimestamp")
+    if not period_start:
+        return ""
+    try:
+        elapsed = max(0, int(pd.Timestamp.now(tz="UTC").timestamp() - float(period_start)) // 60)
+        low = description.lower()
+        if "2nd" in low or "second" in low:
+            elapsed += 45
+        elif "extra" in low:
+            elapsed += 90
+        elif "1st" not in low and "first" not in low:
+            return ""
+        return f"{elapsed}′"
+    except (TypeError, ValueError, OverflowError):
+        return ""
 
 
-def _hbt_grade(actual_total, line, side):
-    if pd.isna(actual_total):
-        return None
-    if side == "ÜST":
-        return bool(float(actual_total) > float(line))
-    return bool(float(actual_total) < float(line))
-
-
-def _hbt_run(start_day, end_day, n_last, min_probability, min_sample):
-    if results.empty:
-        return [], 0, 0
-    required = {"date", "home", "away", "home_k", "away_k", "ft_home", "ft_away"}
-    if not required.issubset(results.columns):
-        return [], 0, 0
-
-    data = results.copy()
-    data["_hbt_date"] = pd.to_datetime(data["date"], errors="coerce").dt.date
-    data = data[(data["_hbt_date"] >= start_day) & (data["_hbt_date"] <= end_day)]
-    data = data[_hbt_safe_num(data["ft_home"]).notna() & _hbt_safe_num(data["ft_away"]).notna()]
-    data = data.sort_values(["_hbt_date", "home", "away"])
-
-    rows, skipped = [], 0
-    goal_lines = (1.5, 2.5, 3.5)
-    corner_lines = (7.5, 8.5, 9.5, 10.5)
-
-    for day, day_games in data.groupby("_hbt_date", sort=True):
-        # Eyni gündəki oyunlar bir-birinin proqnozuna daxil edilmir.
-        before = results[pd.to_datetime(results["date"], errors="coerce") < pd.Timestamp(day)]
-        for _, game in day_games.iterrows():
-            home_key, away_key = str(game["home_k"]), str(game["away_k"])
-            if not home_key or not away_key or home_key == "nan" or away_key == "nan":
-                skipped += 1
+def _ss_live_events():
+    payload, err = _ss_get("sport/football/events/live")
+    if err:
+        return [], err
+    events = payload.get("events") or []
+    rows = []
+    for event in events:
+        try:
+            home = event.get("homeTeam") or {}
+            away = event.get("awayTeam") or {}
+            tournament = event.get("tournament") or {}
+            status = event.get("status") or {}
+            event_time = event.get("time") or {}
+            event_id = event.get("id")
+            if not event_id or not home.get("name") or not away.get("name"):
                 continue
+            rows.append({
+                "id": str(event_id),
+                "home": str(home["name"]),
+                "away": str(away["name"]),
+                "league": str(tournament.get("name") or (event.get("tournament") or {}).get("uniqueTournament", {}).get("name") or "Naməlum yarış"),
+                "status": str(status.get("description") or status.get("type") or "Canlı"),
+                "minute": _ss_live_minute(event, event_time, status),
+                "home_score": (event.get("homeScore") or {}).get("current"),
+                "away_score": (event.get("awayScore") or {}).get("current"),
+                "start_ts": event.get("startTimestamp"),
+                "status_type": str(status.get("type") or ""),
+            })
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return rows, None
 
-            home_hist = _hbt_history(home_key, day, n_last)
-            away_hist = _hbt_history(away_key, day, n_last)
-            if home_hist.empty or away_hist.empty:
-                skipped += 1
-                continue
 
-            actual_goals = float(game["ft_home"]) + float(game["ft_away"])
-            hc = _hbt_safe_num(pd.Series([game.get("home_corners")])).iloc[0]
-            ac = _hbt_safe_num(pd.Series([game.get("away_corners")])).iloc[0]
-            if pd.notna(hc) and not 0 <= float(hc) <= 30:
-                hc = np.nan
-            if pd.notna(ac) and not 0 <= float(ac) <= 30:
-                ac = np.nan
-            actual_corners = float(hc) + float(ac) if pd.notna(hc) and pd.notna(ac) else np.nan
+def _ss_find_stat(stat_items, needles):
+    """Find one stat by key/name aliases; uses raw homeValue/awayValue when available."""
+    for item in stat_items:
+        key = str(item.get("key") or "").lower().replace("_", "").replace(" ", "")
+        name = str(item.get("name") or "").lower()
+        if any(n in key or n in name for n in needles):
+            hv = item.get("homeValue")
+            av = item.get("awayValue")
+            if hv is None:
+                hv = item.get("home")
+            if av is None:
+                av = item.get("away")
+            return _ss_numeric(hv), _ss_numeric(av)
+    return np.nan, np.nan
 
-            base = {
-                "Tarix": pd.Timestamp(day).strftime("%d.%m.%Y"),
-                "Saat": game.get("time", ""),
-                "Liqa": game.get("league", ""),
-                "Ev sahibi": game.get("home", ""),
-                "Qonaq": game.get("away", ""),
-                "Hesab": f"{int(float(game['ft_home']))}:{int(float(game['ft_away']))}",
-                "Künc": f"{int(hc)}:{int(ac)}" if pd.notna(actual_corners) else "Məlumat yoxdur",
-            }
 
-            for market, lines, actual in (
-                ("Qol", goal_lines, actual_goals),
-                ("Künc", corner_lines, actual_corners),
-            ):
-                if market == "Künc" and pd.isna(actual):
+def _ss_event_stats(event_id):
+    """Fetch team stats. xG falls back to summing shotmap xG if team xG is absent."""
+    payload, err = _ss_get(f"event/{event_id}/statistics")
+    if err:
+        return None, err
+    periods = payload.get("statistics") or []
+    all_period = next((p for p in periods if str(p.get("period", "")).upper() == "ALL"), None)
+    if all_period is None and periods:
+        all_period = periods[0]
+    if not all_period:
+        return None, "Statistika hələ mövcud deyil"
+
+    items = []
+    for group in all_period.get("groups") or []:
+        items.extend(group.get("statisticsItems") or [])
+
+    aliases = {
+        "xg_home": ("expectedgoals", "xg"),
+        "shots_home": ("totalshots", "total shots", "shots"),
+        "target_home": ("shotsontarget", "shots on target", "shots on goal"),
+        "corners_home": ("cornerkicks", "corner kicks", "corners"),
+        "big_home": ("bigchances", "big chances"),
+        "danger_home": ("dangerousattacks", "dangerous attacks"),
+        "attacks_home": ("attacks",),
+        "possession_home": ("ballpossession", "ball possession"),
+    }
+    out = {}
+    for key, needles in aliases.items():
+        h, a = _ss_find_stat(items, needles)
+        out[key] = h
+        out[key.replace("_home", "_away")] = a
+
+    # SofaScore's team-stat endpoint does not expose xG for every competition.
+    # If missing, derive xG totals from individual shotmap entries where available.
+    if pd.isna(out.get("xg_home")) or pd.isna(out.get("xg_away")):
+        shot_payload, shot_err = _ss_get(f"event/{event_id}/shotmap")
+        if not shot_err:
+            shots = shot_payload.get("shotmap") or shot_payload.get("shots") or []
+            xg_h, xg_a, found = 0.0, 0.0, False
+            for shot in shots:
+                xg = _ss_numeric(shot.get("xg", shot.get("expectedGoals")))
+                if pd.isna(xg):
                     continue
-                for line in lines:
-                    prior_rate = _hbt_prior(before, market, line)
-                    hp, hn = _hbt_rate(home_hist, home_key, market, line, prior_rate)
-                    ap, an = _hbt_rate(away_hist, away_key, market, line, prior_rate)
-                    if hp is None or ap is None:
-                        continue
-                    sample = min(hn, an)
-                    if sample < int(min_sample):
-                        continue
+                found = True
+                if shot.get("isHome") is True:
+                    xg_h += xg
+                elif shot.get("isHome") is False:
+                    xg_a += xg
+            if found:
+                out["xg_home"], out["xg_away"] = xg_h, xg_a
 
-                    p_over = (hp + ap) / 2.0
-                    for side, probability in (("ÜST", p_over), ("ALT", 1.0 - p_over)):
-                        if probability * 100 < float(min_probability):
-                            continue
-                        hit = _hbt_grade(actual, line, side)
-                        rows.append({
-                            **base,
-                            "Bazar": market,
-                            "Proqnoz": f"{side} {line}",
-                            "Ehtimal %": round(probability * 100, 1),
-                            "Nümunə": sample,
-                            "Faktiki cəm": round(actual, 1),
-                            "Status": "✓ TUTDU" if hit is True else "✕ TUTMADI",
-                            "_hit": hit,
-                        })
-
-    return rows, int(len(data)), skipped
+    out["xg_source"] = "SofaScore statistikası" if not (pd.isna(out.get("xg_home")) or pd.isna(out.get("xg_away"))) else "xG verilməyib"
+    out["stats_timestamp"] = pd.Timestamp.now(tz="UTC").timestamp()
+    return out, None
 
 
-def _hbt_shift(key, amount):
-    st.session_state[key] = st.session_state.get(key, baku_today()) + timedelta(days=amount)
+def _ss_snapshot_delta(history, now_ts, metric, minutes):
+    """Nearest prior snapshot around N minutes ago; rejects stale/misaligned baselines."""
+    target = now_ts - minutes * 60
+    candidates = [x for x in history if x.get("ts", 0) <= now_ts - 30]
+    if not candidates:
+        return np.nan
+    baseline = min(candidates, key=lambda x: abs(x.get("ts", 0) - target))
+    age = now_ts - baseline.get("ts", 0)
+    if abs(age - minutes * 60) > 150:
+        return np.nan
+    old = baseline.get("stats", {}).get(metric, np.nan)
+    current = history[-1].get("stats", {}).get(metric, np.nan) if history else np.nan
+    if pd.isna(old) or pd.isna(current):
+        return np.nan
+    return float(current) - float(old)
 
 
-with st.container(border=True, key="historical_backtest_section_v1"):
-    st.markdown("## 📊 HISTORICAL BACKTEST")
-    st.caption("Tarixi proqnozların yoxlanması · Hər oyun üçün yalnız həmin gündən ƏVVƏL baş vermiş oyunlar modelə daxil edilir.")
-    st.info("Bu bölmə mövcud MATCH INTELLIGENCE-dən ayrıdır. Əsas filtrləri, kuponları və əvvəlki analiz nəticələrini dəyişmir; yalnız nəticələr bazasını oxuyur.")
-
-    _hbt_today = baku_today()
-    st.session_state.setdefault("hbt_start_v1", _hbt_today - timedelta(days=30))
-    st.session_state.setdefault("hbt_end_v1", _hbt_today - timedelta(days=1))
-
-    st.caption("Başlanğıc tarixi")
-    _h1, _h2, _h3 = st.columns([0.55, 3.4, 0.55], gap="small")
-    _h1.button("‹", key="hbt_start_prev_v1", on_click=_hbt_shift, args=("hbt_start_v1", -1))
-    _h2.date_input("Başlanğıc", key="hbt_start_v1", format="DD.MM.YYYY", label_visibility="collapsed")
-    _h3.button("›", key="hbt_start_next_v1", on_click=_hbt_shift, args=("hbt_start_v1", 1))
-
-    st.caption("Son tarix")
-    _h4, _h5, _h6 = st.columns([0.55, 3.4, 0.55], gap="small")
-    _h4.button("‹", key="hbt_end_prev_v1", on_click=_hbt_shift, args=("hbt_end_v1", -1))
-    _h5.date_input("Son tarix", key="hbt_end_v1", format="DD.MM.YYYY", label_visibility="collapsed")
-    _h6.button("›", key="hbt_end_next_v1", on_click=_hbt_shift, args=("hbt_end_v1", 1))
-
-    _hbta, _hbtb, _hbtc = st.columns(3)
-    _hbt_n = int(_hbta.number_input("Komanda üzrə son oyun sayı", min_value=3, max_value=30, value=10, key="hbt_n_v1"))
-    _hbt_min_sample = int(_hbtb.number_input("Minimum nümunə", min_value=1, max_value=15, value=3, key="hbt_sample_v1"))
-    _hbt_min_prob = int(_hbtc.slider("Minimum ehtimal (%)", min_value=50, max_value=90, value=60, key="hbt_prob_v1"))
-
-    if st.button("🔬 TARİXİ TESTİ İŞƏ SAL", type="primary", use_container_width=True, key="hbt_run_v1"):
-        _hbt_from, _hbt_to = st.session_state["hbt_start_v1"], st.session_state["hbt_end_v1"]
-        if _hbt_from > _hbt_to:
-            st.error("Başlanğıc tarixi son tarixdən sonra ola bilməz.")
-        else:
-            _hbt_rows, _hbt_games, _hbt_skipped = _hbt_run(
-                _hbt_from, _hbt_to, _hbt_n, _hbt_min_prob, _hbt_min_sample
-            )
-            st.session_state["hbt_result_v1"] = {
-                "rows": _hbt_rows, "games": _hbt_games, "skipped": _hbt_skipped,
-                "start": _hbt_from, "end": _hbt_to, "n": _hbt_n,
-                "prob": _hbt_min_prob, "sample": _hbt_min_sample,
-            }
-
-    _hbt_result = st.session_state.get("hbt_result_v1")
-    if _hbt_result:
-        st.divider()
-        _hbt_rows = _hbt_result["rows"]
-        _hbt_settled = [x for x in _hbt_rows if x["_hit"] is not None]
-        _hbt_wins = sum(x["_hit"] is True for x in _hbt_settled)
-        _hbt_rate = (100 * _hbt_wins / len(_hbt_settled)) if _hbt_settled else 0.0
-
-        _hbt_c1, _hbt_c2, _hbt_c3, _hbt_c4 = st.columns(4)
-        _hbt_c1.metric("Yoxlanmış oyun", _hbt_result["games"])
-        _hbt_c2.metric("Proqnoz sayı", len(_hbt_rows))
-        _hbt_c3.metric("Düzgün proqnoz", f"{_hbt_wins}/{len(_hbt_settled)}")
-        _hbt_c4.metric("Ümumi dəqiqlik", f"{_hbt_rate:.1f}%")
-
-        st.caption(
-            f"Aralıq: {_hbt_result['start'].strftime('%d.%m.%Y')} – {_hbt_result['end'].strftime('%d.%m.%Y')} "
-            f"· Nəticəsi/proqnoz bazası çatışmayan oyun: {_hbt_result['skipped']} "
-            f"· Nümunə: son {_hbt_result['n']} oyun · minimum ehtimal: {_hbt_result['prob']}%"
+def _ss_pressure_score(stats, deltas, kind):
+    """Transparent activity index (0-100), NOT a calibrated goal probability."""
+    if kind == "goal":
+        features = (
+            ("xg_10", 0.50, 35),
+            ("shots_10", 5, 20),
+            ("target_10", 3, 25),
+            ("big_10", 2, 20),
         )
+    else:
+        # Corners are mandatory for a corner-pressure index; the other signals enrich it.
+        if pd.isna(deltas.get("corners_10")):
+            return np.nan
+        features = (
+            ("corners_10", 4, 45),
+            ("shots_10", 5, 20),
+            ("danger_10", 20, 20),
+            ("attacks_10", 30, 15),
+        )
+    used_weight, points = 0.0, 0.0
+    for key, cap, weight in features:
+        value = deltas.get(key, np.nan)
+        if pd.isna(value):
+            continue
+        used_weight += weight
+        points += min(max(float(value), 0.0), cap) / cap * weight
+    return round(points / used_weight * 100, 1) if used_weight else np.nan
 
-        if _hbt_rows:
-            _hbt_df = pd.DataFrame(_hbt_rows)
-            _hbt_summary = []
-            for (_market, _pick), _grp in _hbt_df.groupby(["Bazar", "Proqnoz"], sort=True):
-                _valid = _grp["_hit"].dropna()
-                _wins = int(_valid.sum())
-                _hbt_summary.append({
-                    "Bazar": _market, "Proqnoz": _pick, "Seçim": len(_grp),
-                    "Düzgün": _wins, "Səhv": int(len(_valid) - _wins),
-                    "Dəqiqlik %": round(100 * _wins / len(_valid), 1) if len(_valid) else None,
+
+def _ss_pressure_label(score):
+    if pd.isna(score):
+        return "Məlumat yığılır"
+    if score >= 70:
+        return "ÇOX YÜKSƏK"
+    if score >= 45:
+        return "YÜKSƏK"
+    if score >= 25:
+        return "ORTA"
+    return "AŞAĞI"
+
+
+def _ss_scan_live():
+    """Fetch live event list and current statistics in parallel."""
+    events, err = _ss_live_events()
+    if err:
+        return [], err, 0
+    # Bütün canlı oyunları skan et; siyahı süni şəkildə 60 oyunla məhdudlaşdırılmır.
+    selected = events
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        stats_list = list(pool.map(lambda ev: _ss_event_stats(ev["id"]), selected))
+    rows, stat_errors = [], 0
+    for event, result in zip(selected, stats_list):
+        stats, stat_err = result
+        if stat_err or not stats:
+            stat_errors += 1
+            stats = {}
+        rows.append({**event, **stats, "stats_error": stat_err})
+    return rows, None, stat_errors
+
+
+def _ss_delta_text(value, suffix=""):
+    return "—" if pd.isna(value) else f"{value:+.2f}{suffix}"
+
+
+def _ss_scan_fragment():
+    """Refreshable fragment: every 60s while the live scanner is visible."""
+    if "ss_live_history_v1" not in st.session_state:
+        st.session_state["ss_live_history_v1"] = {}
+    if "ss_live_last_scan_v1" not in st.session_state:
+        st.session_state["ss_live_last_scan_v1"] = None
+
+    with st.container(border=True, key="sofascore_live_momentum_scanner"):
+        st.markdown("## ⚡ LIVE MATCH MOMENTUM")
+        st.caption("SofaScore canlı statistikası · xG · zərbələr · qapıya dəqiq zərbələr · künclər · son 5/10 dəqiqənin dəyişimi")
+        st.warning(
+            "Qeyd: SofaScore-un rəsmi açıq API-si yoxdur. Bu modul saytın sənədləşdirilməmiş açıq endpoint-lərindən istifadə edir; "
+            "SofaScore girişi bloklaya və ya endpoint-i dəyişə bilər."
+        )
+        col_a, col_b = st.columns([1.2, 1])
+        with col_a:
+            st.caption("Avtomatik yenilənmə: hər 60 saniyə")
+        with col_b:
+            if st.button("🔄 İndi yenilə", use_container_width=True, key="ss_manual_refresh_v1"):
+                st.session_state["ss_force_refresh_v1"] = True
+
+        rows = []
+        scan_error = None
+        stat_errors = 0
+        should_scan = st.session_state.pop("ss_force_refresh_v1", False)
+        last_scan = st.session_state.get("ss_live_last_scan_v1")
+        now_epoch = pd.Timestamp.now(tz="UTC").timestamp()
+        if should_scan or last_scan is None or now_epoch - float(last_scan) >= 55:
+            with st.spinner("SofaScore canlı oyunları və statistikaları yüklənir..."):
+                rows, scan_error, stat_errors = _ss_scan_live()
+            if not scan_error:
+                history = st.session_state["ss_live_history_v1"]
+                for row in rows:
+                    if row.get("stats_error"):
+                        continue
+                    event_id = row["id"]
+                    snapshots = history.setdefault(event_id, [])
+                    stats = {k: row.get(k, np.nan) for k in (
+                        "xg_home", "xg_away", "shots_home", "shots_away",
+                        "target_home", "target_away", "corners_home", "corners_away",
+                        "big_home", "big_away", "danger_home", "danger_away",
+                        "attacks_home", "attacks_away",
+                    )}
+                    snapshots.append({"ts": now_epoch, "stats": stats})
+                    history[event_id] = snapshots[-16:]
+                st.session_state["ss_live_last_scan_v1"] = now_epoch
+                st.session_state["ss_live_current_rows_v1"] = rows
+            else:
+                st.session_state["ss_live_scan_error_v1"] = scan_error
+        else:
+            rows = st.session_state.get("ss_live_current_rows_v1", [])
+            scan_error = st.session_state.get("ss_live_scan_error_v1")
+
+        if scan_error:
+            st.error(f"SofaScore məlumatı alınmadı: {scan_error}")
+            st.caption("Bir qədər sonra yenidən yoxla. HTTP 403/429 cavabı mənbənin avtomatik sorğuları məhdudlaşdırdığını göstərə bilər.")
+        elif not rows:
+            st.info("Hazırda SofaScore-un canlı siyahısında oyun tapılmadı.")
+        else:
+            history = st.session_state["ss_live_history_v1"]
+            display_rows = []
+            for row in rows:
+                snaps = history.get(row["id"], [])
+                current_stats = snaps[-1]["stats"] if snaps else {}
+                deltas = {}
+                for metric, short in (
+                    ("xg_home", "xg"), ("xg_away", "xg"),
+                    ("shots_home", "shots"), ("shots_away", "shots"),
+                    ("target_home", "target"), ("target_away", "target"),
+                    ("corners_home", "corners"), ("corners_away", "corners"),
+                    ("big_home", "big"), ("big_away", "big"),
+                    ("danger_home", "danger"), ("danger_away", "danger"),
+                    ("attacks_home", "attacks"), ("attacks_away", "attacks"),
+                ):
+                    for mins in (5, 10):
+                        deltas[f"{short}_{mins}_{metric}"] = _ss_snapshot_delta(snaps, now_epoch, metric, mins)
+                # Build combined team-level increments for both sides.
+                combined = {}
+                for short in ("xg", "shots", "target", "corners", "big", "danger", "attacks"):
+                    for mins in (5, 10):
+                        vals = []
+                        for side in ("home", "away"):
+                            metric_key = f"{short}_{side}"
+                            vals.append(_ss_snapshot_delta(snaps, now_epoch, metric_key, mins))
+                        valid = [v for v in vals if pd.notna(v)]
+                        combined[f"{short}_{mins}"] = sum(valid) if len(valid) == 2 else np.nan
+                goal_score = _ss_pressure_score(current_stats, combined, "goal")
+                corner_score = _ss_pressure_score(current_stats, combined, "corner")
+                display_rows.append({
+                    **row,
+                    "goal_pressure": goal_score,
+                    "corner_pressure": corner_score,
+                    "goal_label": _ss_pressure_label(goal_score),
+                    "corner_label": _ss_pressure_label(corner_score),
+                    "deltas": combined,
                 })
-            st.markdown("**Bazarlar üzrə nəticə**")
-            st.dataframe(pd.DataFrame(_hbt_summary), use_container_width=True, hide_index=True)
-            st.markdown("**Bütün proqnozlar**")
-            _hbt_show = _hbt_df.drop(columns=["_hit"])
-            # Tam siyahı göstərilir; süni 100/200/500 sətir limiti yoxdur.
-            st.dataframe(_hbt_show, use_container_width=True, hide_index=True, height=520)
-            st.download_button(
-                "⬇️ Nəticələri CSV yüklə",
-                data=_hbt_show.to_csv(index=False).encode("utf-8-sig"),
-                file_name="historical_backtest.csv",
-                mime="text/csv",
-                key="hbt_csv_v1",
-            )
-        else:
-            st.warning("Seçilmiş tarix aralığında şərtlərə uyğun proqnoz tapılmadı. Bu, həmin günlərdə oyun olmadığı anlamına gəlməyə bilər.")
 
-        st.caption(
-            "Qeyd: Bu, sadə tarixi statistik backtest-dir; gələcək nəticələrə zəmanət vermir. "
-            "Dəqiqlik yalnız yaradılmış və nəticəsi məlum olan proqnozlar üzrə hesablanır. "
-            "Qol və künc bazarlarının nəticələri ayrıca cədvəldə göstərilir."
-        )
+            display_rows.sort(
+                key=lambda r: max(
+                    r.get("goal_pressure", 0) if pd.notna(r.get("goal_pressure")) else 0,
+                    r.get("corner_pressure", 0) if pd.notna(r.get("corner_pressure")) else 0,
+                ),
+                reverse=True,
+            )
+            st.caption(
+                f"Canlı oyun: {len(rows)} · Statistikası alınmayan: {stat_errors} · "
+                f"Son yoxlama: {pd.Timestamp.now(tz='Asia/Baku').strftime('%H:%M:%S')} Bakı vaxtı"
+            )
+            for idx, item in enumerate(display_rows, 1):
+                score = f"{item.get('home_score') if item.get('home_score') is not None else 0}–{item.get('away_score') if item.get('away_score') is not None else 0}"
+                with st.expander(
+                    f"{idx}. {item['goal_label']} qol / {item['corner_label']} künc · "
+                    f"{item['home']} {score} {item['away']} · {item.get('minute') or item['status']}",
+                    expanded=(idx <= 5),
+                ):
+                    st.write(f"**Yarış:** {item['league']}")
+                    st.write(f"**Qol təhlükəsi indeksi:** {item['goal_pressure']}/100 · **Künc təhlükəsi indeksi:** {item['corner_pressure']}/100")
+                    st.caption("Bu indekslər son 10 dəqiqədəki statistik artımdan hesablanır; mərc ehtimalı və ya zəmanətli proqnoz deyil.")
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("xG", f"{item.get('xg_home', np.nan):.2f} : {item.get('xg_away', np.nan):.2f}" if pd.notna(item.get("xg_home")) and pd.notna(item.get("xg_away")) else "—",
+                              _ss_delta_text(item["deltas"].get("xg_5"), " / 5 dəq") if pd.notna(item["deltas"].get("xg_5")) else None)
+                    c2.metric("Zərbə", f"{item.get('shots_home', np.nan):.0f} : {item.get('shots_away', np.nan):.0f}" if pd.notna(item.get("shots_home")) and pd.notna(item.get("shots_away")) else "—",
+                              _ss_delta_text(item["deltas"].get("shots_5"), " / 5 dəq") if pd.notna(item["deltas"].get("shots_5")) else None)
+                    c3.metric("Dəqiq zərbə", f"{item.get('target_home', np.nan):.0f} : {item.get('target_away', np.nan):.0f}" if pd.notna(item.get("target_home")) and pd.notna(item.get("target_away")) else "—",
+                              _ss_delta_text(item["deltas"].get("target_5"), " / 5 dəq") if pd.notna(item["deltas"].get("target_5")) else None)
+                    c4.metric("Künc", f"{item.get('corners_home', np.nan):.0f} : {item.get('corners_away', np.nan):.0f}" if pd.notna(item.get("corners_home")) and pd.notna(item.get("corners_away")) else "—",
+                              _ss_delta_text(item["deltas"].get("corners_5"), " / 5 dəq") if pd.notna(item["deltas"].get("corners_5")) else None)
+                    c5, c6, c7, c8 = st.columns(4)
+                    c5.metric("Böyük fürsət", f"{item.get('big_home', np.nan):.0f} : {item.get('big_away', np.nan):.0f}" if pd.notna(item.get("big_home")) and pd.notna(item.get("big_away")) else "—")
+                    c6.metric("Təhlükəli hücum", f"{item.get('danger_home', np.nan):.0f} : {item.get('danger_away', np.nan):.0f}" if pd.notna(item.get("danger_home")) and pd.notna(item.get("danger_away")) else "Mənbə vermir")
+                    c7.metric("Hücumlar", f"{item.get('attacks_home', np.nan):.0f} : {item.get('attacks_away', np.nan):.0f}" if pd.notna(item.get("attacks_home")) and pd.notna(item.get("attacks_away")) else "—")
+                    c8.metric("Topa sahibolma", f"{item.get('possession_home', np.nan):.0f}% : {item.get('possession_away', np.nan):.0f}%" if pd.notna(item.get("possession_home")) and pd.notna(item.get("possession_away")) else "—")
+                    st.write(
+                        f"**10 dəqiqəlik artım:** xG {_ss_delta_text(item['deltas'].get('xg_10'))} · "
+                        f"zərbə {_ss_delta_text(item['deltas'].get('shots_10'))} · "
+                        f"dəqiq zərbə {_ss_delta_text(item['deltas'].get('target_10'))} · "
+                        f"künc {_ss_delta_text(item['deltas'].get('corners_10'))}"
+                    )
+                    if item.get("stats_error"):
+                        st.caption(f"Statistika xəbərdarlığı: {item['stats_error']}")
+
+            st.divider()
+            st.caption(
+                "İlk açılışda 5 və 10 dəqiqəlik dəyişikliklər görünməyəcək. Səhifə açıq qalmalı və ardıcıl skanlar "
+                "yığılmalıdır. Tarixçə bu brauzer sessiyası üçündür; səhifə sessiyası sıfırlansa, yenidən yığılacaq."
+            )
+
+
+if hasattr(st, "fragment"):
+    st.fragment(run_every="60s")(_ss_scan_fragment)()
+else:
+    _ss_scan_fragment()
