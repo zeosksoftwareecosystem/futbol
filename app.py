@@ -2,7 +2,7 @@ from pathlib import Path
 import functools, zipfile, io, re, difflib, unicodedata, requests, shutil, tempfile, json
 from datetime import datetime, timezone
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
 import numpy as np
 import pandas as pd
@@ -1111,11 +1111,15 @@ def _espn_stats(slug, event_id):
                 continue
             if name in ('woncorners', 'cornerkicks', 'corners') or 'corner' in label:
                 out.setdefault(f'{side}_corners', int(val))
-            elif name == 'shotsontarget' or label in ('shots on target', 'shots on goal'):
+            elif name in ('shotsontarget', 'shotsongoal') or label in ('shots on target', 'shots on goal'):
                 out.setdefault(f'{side}_target', int(val))
-            elif name == 'totalshots' or label in ('shots', 'total shots'):
+            elif name in ('totalshots', 'shots') or label in ('shots', 'total shots'):
                 out.setdefault(f'{side}_shots', int(val))
-    for a_, b_ in (('home_corners', 'away_corners'), ('home_shots', 'away_shots'), ('home_target', 'away_target')):
+            elif name in ('expectedgoals', 'xg') or label in ('expected goals', 'xg'):
+                out.setdefault(f'{side}_xg', float(val))
+            elif 'big chance' in label or name in ('bigchances', 'bigchancescreated'):
+                out.setdefault(f'{side}_big', int(val))
+    for a_, b_ in (('home_corners', 'away_corners'), ('home_shots', 'away_shots'), ('home_target', 'away_target'), ('home_xg', 'away_xg'), ('home_big', 'away_big')):
         if not (a_ in out and b_ in out):
             out.pop(a_, None)
             out.pop(b_, None)
@@ -5762,7 +5766,7 @@ with st.container(border=True, key='match_intelligence_section'):
                     status = '🔎 GÖZLƏNİLİR / NƏTİCƏ YOXDUR'
                 tm = item['time'] if isinstance(item.get('time'), str) and item['time'] else '--:--'
                 with st.expander(f"{i}. {item['prob']:.1f}% · {day_txt} {tm} · {item['home']} — {item['away']} · {item['market']}: {item['pick']} · {status}"):
-                    st.write(f"**Yarış:** {item['league']}")
+                    st.write(f"**Yarış:** {item['league']} · **Mənbə:** {item.get('source', '—')}")
                     st.write(f"**Model ehtimalı:** {item['prob']:.1f}%")
                     
                     if item['market'] == 'Künc':
@@ -5796,7 +5800,7 @@ SOFASCORE_HEADERS = {
 
 
 def _ss_get(path, timeout=12):
-    """SofaScore web endpoint. Returns (JSON, error)."""
+    """SofaScore web endpoint via ordinary HTTP. Returns (JSON, error)."""
     try:
         response = requests.get(
             f"{SOFASCORE_BASE}/{path.lstrip('/')}",
@@ -5813,6 +5817,40 @@ def _ss_get(path, timeout=12):
         return None, f"{type(exc).__name__}: {str(exc)[:140]}"
     except ValueError:
         return None, "JSON oxunmadı"
+
+
+def _ss_scraperfc_get(path, timeout=30):
+    """SofaScore JSON via ScraperFC's Botasaurus browser transport (403 fallback).
+
+    This is intentionally lazy-imported: the main app remains usable without the
+    optional package. It does not defeat every challenge and may need a working
+    Chrome/Chromium installation on the host.
+    """
+    try:
+        from ScraperFC.utils.botasaurus_getters import botasaurus_browser_get_json
+    except Exception as exc:
+        return None, f"ScraperFC mövcud deyil: {type(exc).__name__}"
+    try:
+        url = f"https://api.sofascore.com/api/v1/{path.lstrip('/')}"
+        payload = botasaurus_browser_get_json(url, headless=True, block_images_and_css=True)
+        if not isinstance(payload, dict):
+            return None, "ScraperFC JSON cavabı düzgün formatda deyil"
+        if payload.get("error") and not payload.get("events") and not payload.get("statistics"):
+            return None, str(payload.get("error"))[:160]
+        return payload, None
+    except Exception as exc:
+        return None, f"ScraperFC/Botasaurus: {type(exc).__name__}: {str(exc)[:120]}"
+
+
+def _ss_get_with_fallback(path, timeout=12):
+    """Try lightweight requests first, then ScraperFC browser transport."""
+    payload, err = _ss_get(path, timeout=timeout)
+    if payload is not None:
+        return payload, None, "SofaScore HTTP"
+    browser_payload, browser_err = _ss_scraperfc_get(path)
+    if browser_payload is not None:
+        return browser_payload, None, "SofaScore ScraperFC"
+    return None, f"HTTP: {err}; ScraperFC: {browser_err}", ""
 
 
 def _ss_numeric(value):
@@ -5850,7 +5888,7 @@ def _ss_live_minute(event, event_time, status):
 
 
 def _ss_live_events():
-    payload, err = _ss_get("sport/football/events/live")
+    payload, err, transport = _ss_get_with_fallback("sport/football/events/live")
     if err:
         return [], err
     events = payload.get("events") or []
@@ -5876,6 +5914,7 @@ def _ss_live_events():
                 "away_score": (event.get("awayScore") or {}).get("current"),
                 "start_ts": event.get("startTimestamp"),
                 "status_type": str(status.get("type") or ""),
+                "transport": transport,
             })
         except (AttributeError, TypeError, ValueError):
             continue
@@ -5899,8 +5938,8 @@ def _ss_find_stat(stat_items, needles):
 
 
 def _ss_event_stats(event_id):
-    """Fetch team stats. xG falls back to summing shotmap xG if team xG is absent."""
-    payload, err = _ss_get(f"event/{event_id}/statistics")
+    """Fetch team stats. Browser transport is used when ordinary HTTP is blocked."""
+    payload, err, transport = _ss_get_with_fallback(f"event/{event_id}/statistics")
     if err:
         return None, err
     periods = payload.get("statistics") or []
@@ -5933,7 +5972,7 @@ def _ss_event_stats(event_id):
     # SofaScore's team-stat endpoint does not expose xG for every competition.
     # If missing, derive xG totals from individual shotmap entries where available.
     if pd.isna(out.get("xg_home")) or pd.isna(out.get("xg_away")):
-        shot_payload, shot_err = _ss_get(f"event/{event_id}/shotmap")
+        shot_payload, shot_err, shot_transport = _ss_get_with_fallback(f"event/{event_id}/shotmap")
         if not shot_err:
             shots = shot_payload.get("shotmap") or shot_payload.get("shots") or []
             xg_h, xg_a, found = 0.0, 0.0, False
@@ -5948,8 +5987,11 @@ def _ss_event_stats(event_id):
                     xg_a += xg
             if found:
                 out["xg_home"], out["xg_away"] = xg_h, xg_a
+                if str(shot_transport).endswith("ScraperFC"):
+                    transport = shot_transport
 
     out["xg_source"] = "SofaScore statistikası" if not (pd.isna(out.get("xg_home")) or pd.isna(out.get("xg_away"))) else "xG verilməyib"
+    out["stats_transport"] = transport
     out["stats_timestamp"] = pd.Timestamp.now(tz="UTC").timestamp()
     return out, None
 
@@ -6012,23 +6054,98 @@ def _ss_pressure_label(score):
     return "AŞAĞI"
 
 
+def _espn_live_fallback():
+    """SofaScore bloklananda ESPN-in açıq scoreboard/summary mənbəsindən canlı oyunları götür.
+
+    ESPN bütün yarışlarda xG və təzyiq statistikası vermir. Olmayan göstəricilər NaN qalır;
+    heç bir rəqəm təxmin edilmir.
+    """
+    slugs = list(dict.fromkeys(list(ESPN_LEAGUES) + LIVE_EXTRA_SLUGS))
+    league_names = {**ESPN_LEAGUES}
+    rows = []
+    errors = []
+    # Hər liqanın scoreboard sorğusu _live_one daxilində qısa timeout ilə edilir.
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        futures = {pool.submit(_live_one, slug): slug for slug in slugs}
+        for future in as_completed(futures):
+            slug = futures[future]
+            try:
+                found = future.result()
+            except Exception as exc:
+                errors.append(f"{slug}: {type(exc).__name__}")
+                continue
+            for event in found:
+                if not event.get("live"):
+                    continue
+                event["league"] = league_names.get(slug, slug)
+                event["status"] = event.get("detail") or "Canlı"
+                event["minute"] = event.get("detail") or ""
+                event["home_score"] = event.get("hs")
+                event["away_score"] = event.get("as")
+                event["source"] = "ESPN"
+                rows.append(event)
+
+    # Təkrar eyni oyunu fərqli slug/coverage-dən gəlirsə birləşdir.
+    unique = {}
+    for event in rows:
+        unique[event.get("id") or (event.get("home"), event.get("away"))] = event
+    rows = list(unique.values())
+
+    def get_stats(event):
+        try:
+            return _espn_stats(event.get("slug", ""), event.get("id", ""))
+        except Exception:
+            return {}
+
+    if rows:
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            stats_rows = list(pool.map(get_stats, rows))
+        for event, stats in zip(rows, stats_rows):
+            # ESPN summary statistikalarının adları SofaScore modelinə uyğunlaşdırılır.
+            for src, dst in (
+                ("home_corners", "corners_home"), ("away_corners", "corners_away"),
+                ("home_shots", "shots_home"), ("away_shots", "shots_away"),
+                ("home_target", "target_home"), ("away_target", "target_away"),
+                ("home_xg", "xg_home"), ("away_xg", "xg_away"),
+                ("home_big", "big_home"), ("away_big", "big_away"),
+            ):
+                event[dst] = stats.get(src, np.nan)
+            event["xg_source"] = "ESPN" if pd.notna(event.get("xg_home")) and pd.notna(event.get("xg_away")) else "ESPN xG təqdim etmir"
+            event["stats_timestamp"] = pd.Timestamp.now(tz="UTC").timestamp()
+            event["stats_error"] = None if stats else "ESPN bu oyun üçün komanda statistikası vermədi"
+    return rows, errors
+
+
 def _ss_scan_live():
-    """Fetch live event list and current statistics in parallel."""
-    events, err = _ss_live_events()
-    if err:
-        return [], err, 0
-    # Bütün canlı oyunları skan et; siyahı süni şəkildə 60 oyunla məhdudlaşdırılmır.
-    selected = events
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        stats_list = list(pool.map(lambda ev: _ss_event_stats(ev["id"]), selected))
-    rows, stat_errors = [], 0
-    for event, result in zip(selected, stats_list):
-        stats, stat_err = result
-        if stat_err or not stats:
-            stat_errors += 1
-            stats = {}
-        rows.append({**event, **stats, "stats_error": stat_err})
-    return rows, None, stat_errors
+    """SofaScore-u yoxla; 403/429/boş cavabda ESPN açıq scoreboard-a keç."""
+    events, ss_error = _ss_live_events()
+    if events:
+        selected = events
+        # Browser-backed requests are heavier than plain HTTP; keep concurrency low.
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            stats_list = list(pool.map(lambda ev: _ss_event_stats(ev["id"]), selected))
+        rows, stat_errors = [], 0
+        for event, result in zip(selected, stats_list):
+            stats, stat_err = result
+            if stat_err or not stats:
+                stat_errors += 1
+                stats = {}
+            used_browser = str(event.get("transport", "")).endswith("ScraperFC") or str(stats.get("stats_transport", "")).endswith("ScraperFC")
+            rows.append({**event, **stats, "stats_error": stat_err,
+                         "source": "SofaScore + ScraperFC" if used_browser else "SofaScore"})
+        return rows, None, stat_errors
+
+    fallback_rows, fallback_errors = _espn_live_fallback()
+    if fallback_rows:
+        stat_errors = sum(1 for row in fallback_rows if row.get("stats_error"))
+        return fallback_rows, None, stat_errors
+
+    detail = ss_error or "SofaScore canlı oyun qaytarmadı"
+    if fallback_errors:
+        detail += " · ESPN alternativ mənbəsi də cavab vermədi: " + ", ".join(fallback_errors[:4])
+    else:
+        detail += " · ESPN alternativ mənbəsində hazırda canlı oyun tapılmadı"
+    return [], detail, 0
 
 
 def _ss_delta_text(value, suffix=""):
@@ -6045,9 +6162,10 @@ def _ss_scan_fragment():
     with st.container(border=True, key="sofascore_live_momentum_scanner"):
         st.markdown("## ⚡ LIVE MATCH MOMENTUM")
         st.caption("SofaScore canlı statistikası · xG · zərbələr · qapıya dəqiq zərbələr · künclər · son 5/10 dəqiqənin dəyişimi")
-        st.warning(
-            "Qeyd: SofaScore-un rəsmi açıq API-si yoxdur. Bu modul saytın sənədləşdirilməmiş açıq endpoint-lərindən istifadə edir; "
-            "SofaScore girişi bloklaya və ya endpoint-i dəyişə bilər."
+        st.info(
+            "Mənbələr: əvvəl SofaScore HTTP yoxlanılır. HTTP 403/429 olarsa ScraperFC/Botasaurus brauzer sorğusu sınanır; "
+            "o da əlçatan deyilsə ESPN scoreboard/summary alternativinə keçilir. ScraperFC üçün terminalda "
+            "`pip install ScraperFC==4.5.0` quraşdırın. ESPN xG və bəzi detallı göstəriciləri hər oyunda vermir; olmayan məlumat boş qalır."
         )
         col_a, col_b = st.columns([1.2, 1])
         with col_a:
@@ -6139,8 +6257,9 @@ def _ss_scan_fragment():
                 ),
                 reverse=True,
             )
+            sources = ", ".join(sorted({str(r.get("source", "naməlum")) for r in rows}))
             st.caption(
-                f"Canlı oyun: {len(rows)} · Statistikası alınmayan: {stat_errors} · "
+                f"Canlı oyun: {len(rows)} · Mənbə: {sources} · Statistikası natamam: {stat_errors} · "
                 f"Son yoxlama: {pd.Timestamp.now(tz='Asia/Baku').strftime('%H:%M:%S')} Bakı vaxtı"
             )
             for idx, item in enumerate(display_rows, 1):
@@ -6150,7 +6269,7 @@ def _ss_scan_fragment():
                     f"{item['home']} {score} {item['away']} · {item.get('minute') or item['status']}",
                     expanded=(idx <= 5),
                 ):
-                    st.write(f"**Yarış:** {item['league']}")
+                    st.write(f"**Yarış:** {item['league']} · **Mənbə:** {item.get('source', '—')}")
                     st.write(f"**Qol təhlükəsi indeksi:** {item['goal_pressure']}/100 · **Künc təhlükəsi indeksi:** {item['corner_pressure']}/100")
                     st.caption("Bu indekslər son 10 dəqiqədəki statistik artımdan hesablanır; mərc ehtimalı və ya zəmanətli proqnoz deyil.")
                     c1, c2, c3, c4 = st.columns(4)
