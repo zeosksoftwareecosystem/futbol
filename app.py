@@ -5629,118 +5629,88 @@ def _mi_analyze(day, n_last, min_prob, min_sample):
 
 with st.container(border=True, key='match_intelligence_section'):
     st.markdown('## 🧠 MATCH INTELLIGENCE')
-    st.caption('AI FOOTBALL PREDICTION ENGINE · Bütün mövcud yarışlar üzrə statistik ehtimal sıralaması')
-    st.write('Əsas bazarlar: künc, 2.5 qol Üst/Alt və BTTS. Bu bölmə mövcud məlumat bazasını oxuyur və köhnə filtrlərin işinə qarışmır.')
+    st.caption('AI FOOTBALL PREDICTION ENGINE · Seçilmiş tarix aralığında bütün mövcud yarışlar üzrə statistik ehtimal sıralaması')
+    st.write('Başlanğıc və son tarixi seç. Proqram həmin aralıqdakı keçmiş və gələcək oyunları fərqləndirmədən eyni siyahıda göstərəcək.')
 
-    mi_mode = st.radio('Analiz rejimi', ['Gələcək / bir günlük analiz', 'Keçmiş oyunlarda nəticələrin yoxlanması'],
-                       horizontal=True, key='mi_mode')
-    if 'mi_day' not in st.session_state:
-        st.session_state['mi_day'] = baku_today()
-
-    # Compact previous/next controls directly beside the single-day picker.
-    nav1, nav2, nav3 = st.columns([0.38, 3.0, 0.38], gap='small')
-    with nav1:
-        st.button('‹', key='mi_prev_day', help='Əvvəlki gün', use_container_width=True,
-                  on_click=lambda: st.session_state.update(mi_day=st.session_state.get('mi_day', baku_today()) - timedelta(days=1)))
-    with nav2:
-        mi_day = st.date_input('Oyun tarixi', key='mi_day')
-    with nav3:
-        st.button('›', key='mi_next_day', help='Növbəti gün', use_container_width=True,
-                  on_click=lambda: st.session_state.update(mi_day=st.session_state.get('mi_day', baku_today()) + timedelta(days=1)))
-    mi_n = int(st.number_input('Son oyun sayı', min_value=5, max_value=30, value=10, step=1, key='mi_n'))
-
-    mi5, mi6 = st.columns(2)
-    mi_min_sample = int(mi5.number_input('Minimum nümunə', min_value=3, max_value=15, value=5, step=1, key='mi_min_sample'))
-    mi_min_prob = int(mi6.slider('Minimum ehtimal (%)', min_value=50, max_value=90, value=65, step=1, key='mi_min_prob'))
-
-    if mi_mode == 'Keçmiş oyunlarda nəticələrin yoxlanması':
-        default_end = baku_today() - timedelta(days=1)
-        default_start = default_end - timedelta(days=29)
-        # Use a fresh widget key and an explicit two-date value. Streamlit then
-        # opens a date-range picker instead of a single-date picker.
-        mi_range = st.date_input(
-            'Yoxlanılacaq tarix aralığı (başlanğıc – bitiş)',
-            value=(default_start, default_end),
-            key='mi_backtest_range_v2',
-            format='DD.MM.YYYY'
-        )
-        if isinstance(mi_range, (tuple, list)) and len(mi_range) == 2:
-            mi_start, mi_end = mi_range
-        else:
-            mi_start = mi_end = mi_range
-        mi_go = st.button('📊 KEÇMİŞ OYUNLARI ANALİZ ET', type='primary', use_container_width=True, key='mi_backtest_run')
-        if mi_go:
-            if mi_start > mi_end:
-                st.error('Başlanğıc tarixi bitiş tarixindən sonra ola bilməz.')
-            elif (mi_end - mi_start).days > 180:
-                st.error('Bir analizdə maksimum 180 günlük aralıq seçə bilərsən.')
-            else:
-                all_picks, total_games = [], 0
-                days = pd.date_range(mi_start, mi_end, freq='D')
-                progress = st.progress(0, text='Keçmiş oyunlar yoxlanılır...')
-                for idx, day_value in enumerate(days, 1):
-                    day = day_value.date()
-                    day_picks, day_total = _mi_analyze(day, mi_n, mi_min_prob, mi_min_sample)
-                    all_picks.extend(day_picks)
-                    total_games += day_total
-                    progress.progress(idx / len(days), text=f'{day.strftime("%d.%m.%Y")} · {idx}/{len(days)} gün')
-                progress.empty()
-                all_picks.sort(key=lambda x: (x['prob'], x['sample']), reverse=True)
-                st.session_state['mi_backtest_result'] = {'picks': all_picks, 'total': total_games,
-                    'start': mi_start, 'end': mi_end, 'n': mi_n, 'min_prob': mi_min_prob}
-        _mi_R = st.session_state.get('mi_backtest_result')
-        if _mi_R:
-            picks = _mi_R['picks']
-            settled = [p for p in picks if p.get('hit') is not None]
-            hits = sum(1 for p in settled if p['hit'] is True)
-            misses = len(settled) - hits
-            pending = len(picks) - len(settled)
-            accuracy = hits / len(settled) * 100 if settled else 0.0
-            st.divider()
-            st.markdown(f"**{_mi_R['start'].strftime('%d.%m.%Y')} – {_mi_R['end'].strftime('%d.%m.%Y')}** · {_mi_R['total']} oyun yoxlanıldı · {_mi_R['n']} son oyuna əsasən")
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric('Tutdu', hits)
-            k2.metric('Tutmadı', misses)
-            k3.metric('Yoxlanılmayıb', pending)
-            k4.metric('Dəqiqlik', f'{accuracy:.1f}%' if settled else '—')
-            if not picks:
-                st.warning('Bu tarix aralığında seçdiyin ehtimal həddinə uyğun proqnoz tapılmadı.')
-            else:
-                st.caption('Dəqiqlik yalnız faktiki hesabı və bazar statistikası mövcud olan seçimlər üzrə hesablanır. Künc nəticəsi üçün hər iki komandanın künc statistikası olmalıdır.')
-                for i, item in enumerate(picks[:250], 1):
-                    status = '✅ TUTDU' if item.get('hit') is True else ('❌ TUTMADI' if item.get('hit') is False else '⏳ YOXLANA BİLMİR')
-                    day_txt = pd.Timestamp(item['day']).strftime('%d.%m.%Y')
-                    with st.expander(f"{status} · {item['prob']:.1f}% · {day_txt} · {item['home']} — {item['away']} · {item['market']}: {item['pick']}"):
-                        st.write(f"**Yarış:** {item['league']}")
-                        st.write(f"**Proqnoz ehtimalı:** {item['prob']:.1f}%")
-                        score_txt = f"{int(item['ft_home'])} : {int(item['ft_away'])}" if pd.notna(item.get('ft_home')) and pd.notna(item.get('ft_away')) else 'Məlumat yoxdur'
-                        st.write(f"**Faktiki hesab:** {score_txt}")
-                        if pd.notna(item.get('home_corners')) and pd.notna(item.get('away_corners')):
-                            st.write(f"**Faktiki künclər:** {int(item['home_corners'])} : {int(item['away_corners'])} (cəmi {int(item['home_corners']) + int(item['away_corners'])})")
-                        st.write(f"**Yoxlama:** {status}")
-                        st.caption(f"Tarixi nümunə: ev {item['home_n']} oyun · qonaq {item['away_n']} oyun")
-                if len(picks) > 250:
-                    st.caption(f"İlk 250 seçim göstərilir. Ümumi seçim sayı: {len(picks)}.")
+    mi_today = baku_today()
+    mi_default_end = mi_today + timedelta(days=7)
+    mi_range = st.date_input(
+        'Oyunların tarix aralığı (başlanğıc – bitiş)',
+        value=(mi_today, mi_default_end),
+        key='mi_unified_date_range_v1',
+        format='DD.MM.YYYY'
+    )
+    if isinstance(mi_range, (tuple, list)) and len(mi_range) == 2:
+        mi_start, mi_end = mi_range
+    elif isinstance(mi_range, (tuple, list)) and len(mi_range) == 1:
+        mi_start = mi_end = mi_range[0]
     else:
-        mi_go = st.button('🚀 MATCH INTELLIGENCE ANALİZİNİ BAŞLAT', type='primary', use_container_width=True, key='mi_run')
-        if mi_go:
-            with st.spinner('Bütün oyunlar və tarixi göstəricilər təhlil edilir...'):
-                _mi_picks, _mi_total = _mi_analyze(mi_day, mi_n, mi_min_prob, mi_min_sample)
-            st.session_state['mi_result'] = {'picks': _mi_picks, 'total': _mi_total, 'day': mi_day,
-                                             'n': mi_n, 'min_prob': mi_min_prob}
-        _mi_R = st.session_state.get('mi_result')
-        if _mi_R:
-            st.divider()
-            st.markdown(f"**{_mi_R['day'].strftime('%d.%m.%Y')}** · {_mi_R['total']} oyun yoxlanıldı · {_mi_R['n']} son oyuna əsasən · minimum {_mi_R['min_prob']}%")
-            if not _mi_R['picks']:
-                st.warning('Bu şərtlərlə kifayət qədər güclü ehtimallı seçim tapılmadı. Minimum ehtimalı bir qədər azalt və ya başqa tarix seç.')
-            else:
-                for i, item in enumerate(_mi_R['picks'][:100], 1):
-                    tm = item['time'] if isinstance(item['time'], str) and item['time'] else '--:--'
-                    odds_note = f" · odds: {item['odds']['book']}" if item.get('odds') else ''
-                    with st.expander(f"{i}. {item['prob']:.1f}% · {tm} · {item['home']} — {item['away']} · {item['market']}: {item['pick']}"):
-                        st.write(f"**Yarış:** {item['league']}")
-                        st.write(f"**Model ehtimalı:** {item['prob']:.1f}%")
-                        st.write(f"**Tarixi nümunə:** ev komandası {item['home_n']} oyun, qonaq komandası {item['away_n']} oyun")
-                        st.caption('Ehtimal son oyunların göstəricilərindən hesablanır; 2.5 qol bazarında mövcud olduqda bukmeker bazar ortalamasının marjasız ehtimalı da nəzərə alınır.' + odds_note)
-            st.warning('Vacib: faizlər statistik model qiymətləndirməsidir, zəmanət və ya dəqiq nəticə deyil. Künc və BTTS bazarları üçün bukmeker koeffisienti bu versiyada ayrıca mövcud olmadıqda istifadə edilmir.')
+        mi_start = mi_end = mi_range
+
+    mi_n = int(st.number_input('Hər komanda üçün nəzərə alınacaq son oyun sayı', min_value=5, max_value=30, value=10, step=1, key='mi_n_unified'))
+    mi5, mi6 = st.columns(2)
+    mi_min_sample = int(mi5.number_input('Minimum nümunə', min_value=3, max_value=15, value=5, step=1, key='mi_min_sample_unified'))
+    mi_min_prob = int(mi6.slider('Minimum ehtimal (%)', min_value=50, max_value=90, value=65, step=1, key='mi_min_prob_unified'))
+
+    mi_go = st.button('🚀 SEÇİLMİŞ TARİX ARALIĞINI ANALİZ ET', type='primary', use_container_width=True, key='mi_unified_run')
+    if mi_go:
+        if mi_start > mi_end:
+            st.error('Başlanğıc tarixi bitiş tarixindən sonra ola bilməz.')
+        elif (mi_end - mi_start).days > 180:
+            st.error('Bir analizdə maksimum 180 günlük aralıq seçə bilərsən.')
+        else:
+            all_picks, total_games = [], 0
+            days = pd.date_range(mi_start, mi_end, freq='D')
+            progress = st.progress(0, text='Seçilmiş tarix aralığındakı oyunlar analiz edilir...')
+            for idx, day_value in enumerate(days, 1):
+                day = day_value.date()
+                day_picks, day_total = _mi_analyze(day, mi_n, mi_min_prob, mi_min_sample)
+                all_picks.extend(day_picks)
+                total_games += day_total
+                progress.progress(idx / len(days), text=f'{day.strftime("%d.%m.%Y")} · {idx}/{len(days)} gün')
+            progress.empty()
+            all_picks.sort(key=lambda x: (x['prob'], x['sample']), reverse=True)
+            st.session_state['mi_unified_result'] = {
+                'picks': all_picks, 'total': total_games,
+                'start': mi_start, 'end': mi_end, 'n': mi_n,
+                'min_prob': mi_min_prob
+            }
+
+    _mi_R = st.session_state.get('mi_unified_result')
+    if _mi_R:
+        picks = _mi_R['picks']
+        st.divider()
+        st.markdown(
+            f"**{_mi_R['start'].strftime('%d.%m.%Y')} – {_mi_R['end'].strftime('%d.%m.%Y')}**"
+            f" · {_mi_R['total']} oyun yoxlanıldı · {_mi_R['n']} son oyuna əsasən"
+        )
+        st.caption(f"Cəmi {len(picks)} seçim tapıldı · minimum ehtimal: {_mi_R['min_prob']}% · Bütün tarixlər vahid siyahıda, ehtimalı yüksəkdən aşağıya sıralanıb.")
+        if not picks:
+            st.warning('Bu tarix aralığında seçdiyin ehtimal həddinə uyğun proqnoz tapılmadı. Tarix aralığını genişləndirə və ya minimum ehtimalı azalda bilərsən.')
+        else:
+            for i, item in enumerate(picks[:500], 1):
+                day_txt = pd.Timestamp(item['day']).strftime('%d.%m.%Y')
+                has_result = pd.notna(item.get('ft_home')) and pd.notna(item.get('ft_away'))
+                if item.get('hit') is True:
+                    status = '✅ TUTDU'
+                elif item.get('hit') is False:
+                    status = '❌ TUTMADI'
+                elif has_result:
+                    status = '⚪ NƏTİCƏ TAM DEYİL'
+                else:
+                    status = '🔎 GÖZLƏNİLİR / NƏTİCƏ YOXDUR'
+                tm = item['time'] if isinstance(item.get('time'), str) and item['time'] else '--:--'
+                with st.expander(f"{i}. {item['prob']:.1f}% · {day_txt} {tm} · {item['home']} — {item['away']} · {item['market']}: {item['pick']} · {status}"):
+                    st.write(f"**Yarış:** {item['league']}")
+                    st.write(f"**Model ehtimalı:** {item['prob']:.1f}%")
+                    st.write(f"**Tarixi nümunə:** ev komandası {item['home_n']} oyun, qonaq komandası {item['away_n']} oyun")
+                    score_txt = f"{int(item['ft_home'])} : {int(item['ft_away'])}" if has_result else 'Hələ nəticə yoxdur'
+                    st.write(f"**Faktiki hesab:** {score_txt}")
+                    if pd.notna(item.get('home_corners')) and pd.notna(item.get('away_corners')):
+                        st.write(f"**Faktiki künclər:** {int(item['home_corners'])} : {int(item['away_corners'])} (cəmi {int(item['home_corners']) + int(item['away_corners'])})")
+                    if item.get('odds'):
+                        st.caption(f"Bukmeker məlumatı: {item['odds']['book']}")
+                    st.caption(f"Yoxlama statusu: {status}")
+            if len(picks) > 500:
+                st.caption(f"İlk 500 seçim göstərilir. Ümumi seçim sayı: {len(picks)}.")
+        st.warning('Vacib: faizlər statistik model qiymətləndirməsidir, zəmanət və ya dəqiq nəticə deyil. Keçmiş və gələcək oyunlar ayrıca bölünmür; hamısı eyni ehtimal sıralamasında göstərilir.')
