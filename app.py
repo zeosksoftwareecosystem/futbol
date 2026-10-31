@@ -2274,7 +2274,8 @@ def _ah_games(d_from, d_to, sel_leagues, all_leagues):
     g = g.copy()
     g['time'] = g['time'].map(lambda v: '' if pd.isna(v) or str(v) in ('nan', 'NaT', 'None') else str(v))
     # Bitmiş oyunlar da göstərilir (analiz həmişə seçilən oyun günündən əvvəlki oyunlara baxır).
-    return g[cols].sort_values(['_day', 'time'], kind='stable').reset_index(drop=True)
+    g['_nt'] = (g['time'] == '').astype(int)   # saatı olmayan oyunlar siyahının sonuna düşür
+    return g.sort_values(['_day', '_nt', 'time'], kind='stable')[cols].reset_index(drop=True)
 
 
 @st.cache_data(show_spinner=False, max_entries=60)
@@ -3122,9 +3123,6 @@ def render_always_hit(d_from, d_to, sel_leagues, all_leagues, n):
     for i, r in G.iterrows():
         if q and q not in f"{r['home']} {r['away']}".lower():
             continue
-        if shown >= 200:
-            st.caption('İlk 200 oyun göstərildi. Axtarışdan istifadə et.')
-            break
         if r['_day'] != last_day:
             last_day = r['_day']
             st.caption(f'{pd.Timestamp(last_day):%d.%m.%Y}')
