@@ -5779,3 +5779,250 @@ with st.container(border=True, key='match_intelligence_section'):
             if len(picks) > 500:
                 st.caption(f"İlk 500 seçim göstərilir. Ümumi seçim sayı: {len(picks)}.")
         st.warning('Vacib: faizlər statistik model qiymətləndirməsidir, zəmanət və ya dəqiq nəticə deyil. Keçmiş və gələcək oyunlar ayrıca bölünmür; hamısı eyni ehtimal sıralamasında göstərilir.')
+
+
+# =====================================================================================
+# 📊 HISTORICAL BACKTEST — ayrıca geriyə dönük model yoxlaması
+# Mövcud MATCH INTELLIGENCE və əsas filtrlərdən ayrıdır. Yalnız results bazasını oxuyur.
+# =====================================================================================
+def _hbt_safe_num(series):
+    return pd.to_numeric(series, errors="coerce")
+
+
+def _hbt_history(team_key, match_day, n_last):
+    if results.empty or not team_key:
+        return results.iloc[0:0].copy()
+    dts = pd.to_datetime(results["date"], errors="coerce")
+    before = results.loc[dts < pd.Timestamp(match_day)]
+    mask = (before["home_k"].astype(str) == str(team_key)) | (before["away_k"].astype(str) == str(team_key))
+    return before.loc[mask].sort_values("date", ascending=False).head(int(n_last))
+
+
+def _hbt_rate(history, team_key, market, line, prior_rate):
+    if history.empty:
+        return None, 0
+    if market == "Qol":
+        a = _hbt_safe_num(history.get("ft_home", pd.Series(index=history.index, dtype=float)))
+        b = _hbt_safe_num(history.get("ft_away", pd.Series(index=history.index, dtype=float)))
+    else:
+        a = _hbt_safe_num(history.get("home_corners", pd.Series(index=history.index, dtype=float)))
+        b = _hbt_safe_num(history.get("away_corners", pd.Series(index=history.index, dtype=float)))
+        a = a.where(a.between(0, 30))
+        b = b.where(b.between(0, 30))
+    totals = (a + b).dropna()
+    count = int(len(totals))
+    if count == 0:
+        return None, 0
+    hits = int((totals > float(line)).sum())
+    # Sadə Bayes hamarlaması: kiçik nümunələrdə faizin həddən artıq dəyişməsinin qarşısı.
+    p_over = (hits + 3.0 * float(prior_rate)) / (count + 3.0)
+    return float(min(0.995, max(0.005, p_over))), count
+
+
+def _hbt_prior(before, market, line):
+    if before.empty:
+        return 0.50
+    if market == "Qol":
+        a = _hbt_safe_num(before.get("ft_home", pd.Series(dtype=float)))
+        b = _hbt_safe_num(before.get("ft_away", pd.Series(dtype=float)))
+    else:
+        a = _hbt_safe_num(before.get("home_corners", pd.Series(dtype=float)))
+        b = _hbt_safe_num(before.get("away_corners", pd.Series(dtype=float)))
+        a = a.where(a.between(0, 30))
+        b = b.where(b.between(0, 30))
+    total = (a + b).dropna()
+    if len(total) < 10:
+        return 0.50
+    return float((total > float(line)).mean())
+
+
+def _hbt_grade(actual_total, line, side):
+    if pd.isna(actual_total):
+        return None
+    if side == "ÜST":
+        return bool(float(actual_total) > float(line))
+    return bool(float(actual_total) < float(line))
+
+
+def _hbt_run(start_day, end_day, n_last, min_probability, min_sample):
+    if results.empty:
+        return [], 0, 0
+    required = {"date", "home", "away", "home_k", "away_k", "ft_home", "ft_away"}
+    if not required.issubset(results.columns):
+        return [], 0, 0
+
+    data = results.copy()
+    data["_hbt_date"] = pd.to_datetime(data["date"], errors="coerce").dt.date
+    data = data[(data["_hbt_date"] >= start_day) & (data["_hbt_date"] <= end_day)]
+    data = data[_hbt_safe_num(data["ft_home"]).notna() & _hbt_safe_num(data["ft_away"]).notna()]
+    data = data.sort_values(["_hbt_date", "home", "away"])
+
+    rows, skipped = [], 0
+    goal_lines = (1.5, 2.5, 3.5)
+    corner_lines = (7.5, 8.5, 9.5, 10.5)
+
+    for day, day_games in data.groupby("_hbt_date", sort=True):
+        # Eyni gündəki oyunlar bir-birinin proqnozuna daxil edilmir.
+        before = results[pd.to_datetime(results["date"], errors="coerce") < pd.Timestamp(day)]
+        for _, game in day_games.iterrows():
+            home_key, away_key = str(game["home_k"]), str(game["away_k"])
+            if not home_key or not away_key or home_key == "nan" or away_key == "nan":
+                skipped += 1
+                continue
+
+            home_hist = _hbt_history(home_key, day, n_last)
+            away_hist = _hbt_history(away_key, day, n_last)
+            if home_hist.empty or away_hist.empty:
+                skipped += 1
+                continue
+
+            actual_goals = float(game["ft_home"]) + float(game["ft_away"])
+            hc = _hbt_safe_num(pd.Series([game.get("home_corners")])).iloc[0]
+            ac = _hbt_safe_num(pd.Series([game.get("away_corners")])).iloc[0]
+            if pd.notna(hc) and not 0 <= float(hc) <= 30:
+                hc = np.nan
+            if pd.notna(ac) and not 0 <= float(ac) <= 30:
+                ac = np.nan
+            actual_corners = float(hc) + float(ac) if pd.notna(hc) and pd.notna(ac) else np.nan
+
+            base = {
+                "Tarix": pd.Timestamp(day).strftime("%d.%m.%Y"),
+                "Saat": game.get("time", ""),
+                "Liqa": game.get("league", ""),
+                "Ev sahibi": game.get("home", ""),
+                "Qonaq": game.get("away", ""),
+                "Hesab": f"{int(float(game['ft_home']))}:{int(float(game['ft_away']))}",
+                "Künc": f"{int(hc)}:{int(ac)}" if pd.notna(actual_corners) else "Məlumat yoxdur",
+            }
+
+            for market, lines, actual in (
+                ("Qol", goal_lines, actual_goals),
+                ("Künc", corner_lines, actual_corners),
+            ):
+                if market == "Künc" and pd.isna(actual):
+                    continue
+                for line in lines:
+                    prior_rate = _hbt_prior(before, market, line)
+                    hp, hn = _hbt_rate(home_hist, home_key, market, line, prior_rate)
+                    ap, an = _hbt_rate(away_hist, away_key, market, line, prior_rate)
+                    if hp is None or ap is None:
+                        continue
+                    sample = min(hn, an)
+                    if sample < int(min_sample):
+                        continue
+
+                    p_over = (hp + ap) / 2.0
+                    for side, probability in (("ÜST", p_over), ("ALT", 1.0 - p_over)):
+                        if probability * 100 < float(min_probability):
+                            continue
+                        hit = _hbt_grade(actual, line, side)
+                        rows.append({
+                            **base,
+                            "Bazar": market,
+                            "Proqnoz": f"{side} {line}",
+                            "Ehtimal %": round(probability * 100, 1),
+                            "Nümunə": sample,
+                            "Faktiki cəm": round(actual, 1),
+                            "Status": "✓ TUTDU" if hit is True else "✕ TUTMADI",
+                            "_hit": hit,
+                        })
+
+    return rows, int(len(data)), skipped
+
+
+def _hbt_shift(key, amount):
+    st.session_state[key] = st.session_state.get(key, baku_today()) + timedelta(days=amount)
+
+
+with st.container(border=True, key="historical_backtest_section_v1"):
+    st.markdown("## 📊 HISTORICAL BACKTEST")
+    st.caption("Tarixi proqnozların yoxlanması · Hər oyun üçün yalnız həmin gündən ƏVVƏL baş vermiş oyunlar modelə daxil edilir.")
+    st.info("Bu bölmə mövcud MATCH INTELLIGENCE-dən ayrıdır. Əsas filtrləri, kuponları və əvvəlki analiz nəticələrini dəyişmir; yalnız nəticələr bazasını oxuyur.")
+
+    _hbt_today = baku_today()
+    st.session_state.setdefault("hbt_start_v1", _hbt_today - timedelta(days=30))
+    st.session_state.setdefault("hbt_end_v1", _hbt_today - timedelta(days=1))
+
+    st.caption("Başlanğıc tarixi")
+    _h1, _h2, _h3 = st.columns([0.55, 3.4, 0.55], gap="small")
+    _h1.button("‹", key="hbt_start_prev_v1", on_click=_hbt_shift, args=("hbt_start_v1", -1))
+    _h2.date_input("Başlanğıc", key="hbt_start_v1", format="DD.MM.YYYY", label_visibility="collapsed")
+    _h3.button("›", key="hbt_start_next_v1", on_click=_hbt_shift, args=("hbt_start_v1", 1))
+
+    st.caption("Son tarix")
+    _h4, _h5, _h6 = st.columns([0.55, 3.4, 0.55], gap="small")
+    _h4.button("‹", key="hbt_end_prev_v1", on_click=_hbt_shift, args=("hbt_end_v1", -1))
+    _h5.date_input("Son tarix", key="hbt_end_v1", format="DD.MM.YYYY", label_visibility="collapsed")
+    _h6.button("›", key="hbt_end_next_v1", on_click=_hbt_shift, args=("hbt_end_v1", 1))
+
+    _hbta, _hbtb, _hbtc = st.columns(3)
+    _hbt_n = int(_hbta.number_input("Komanda üzrə son oyun sayı", min_value=3, max_value=30, value=10, key="hbt_n_v1"))
+    _hbt_min_sample = int(_hbtb.number_input("Minimum nümunə", min_value=1, max_value=15, value=3, key="hbt_sample_v1"))
+    _hbt_min_prob = int(_hbtc.slider("Minimum ehtimal (%)", min_value=50, max_value=90, value=60, key="hbt_prob_v1"))
+
+    if st.button("🔬 TARİXİ TESTİ İŞƏ SAL", type="primary", use_container_width=True, key="hbt_run_v1"):
+        _hbt_from, _hbt_to = st.session_state["hbt_start_v1"], st.session_state["hbt_end_v1"]
+        if _hbt_from > _hbt_to:
+            st.error("Başlanğıc tarixi son tarixdən sonra ola bilməz.")
+        else:
+            _hbt_rows, _hbt_games, _hbt_skipped = _hbt_run(
+                _hbt_from, _hbt_to, _hbt_n, _hbt_min_prob, _hbt_min_sample
+            )
+            st.session_state["hbt_result_v1"] = {
+                "rows": _hbt_rows, "games": _hbt_games, "skipped": _hbt_skipped,
+                "start": _hbt_from, "end": _hbt_to, "n": _hbt_n,
+                "prob": _hbt_min_prob, "sample": _hbt_min_sample,
+            }
+
+    _hbt_result = st.session_state.get("hbt_result_v1")
+    if _hbt_result:
+        st.divider()
+        _hbt_rows = _hbt_result["rows"]
+        _hbt_settled = [x for x in _hbt_rows if x["_hit"] is not None]
+        _hbt_wins = sum(x["_hit"] is True for x in _hbt_settled)
+        _hbt_rate = (100 * _hbt_wins / len(_hbt_settled)) if _hbt_settled else 0.0
+
+        _hbt_c1, _hbt_c2, _hbt_c3, _hbt_c4 = st.columns(4)
+        _hbt_c1.metric("Yoxlanmış oyun", _hbt_result["games"])
+        _hbt_c2.metric("Proqnoz sayı", len(_hbt_rows))
+        _hbt_c3.metric("Düzgün proqnoz", f"{_hbt_wins}/{len(_hbt_settled)}")
+        _hbt_c4.metric("Ümumi dəqiqlik", f"{_hbt_rate:.1f}%")
+
+        st.caption(
+            f"Aralıq: {_hbt_result['start'].strftime('%d.%m.%Y')} – {_hbt_result['end'].strftime('%d.%m.%Y')} "
+            f"· Nəticəsi/proqnoz bazası çatışmayan oyun: {_hbt_result['skipped']} "
+            f"· Nümunə: son {_hbt_result['n']} oyun · minimum ehtimal: {_hbt_result['prob']}%"
+        )
+
+        if _hbt_rows:
+            _hbt_df = pd.DataFrame(_hbt_rows)
+            _hbt_summary = []
+            for (_market, _pick), _grp in _hbt_df.groupby(["Bazar", "Proqnoz"], sort=True):
+                _valid = _grp["_hit"].dropna()
+                _wins = int(_valid.sum())
+                _hbt_summary.append({
+                    "Bazar": _market, "Proqnoz": _pick, "Seçim": len(_grp),
+                    "Düzgün": _wins, "Səhv": int(len(_valid) - _wins),
+                    "Dəqiqlik %": round(100 * _wins / len(_valid), 1) if len(_valid) else None,
+                })
+            st.markdown("**Bazarlar üzrə nəticə**")
+            st.dataframe(pd.DataFrame(_hbt_summary), use_container_width=True, hide_index=True)
+            st.markdown("**Bütün proqnozlar**")
+            _hbt_show = _hbt_df.drop(columns=["_hit"])
+            # Tam siyahı göstərilir; süni 100/200/500 sətir limiti yoxdur.
+            st.dataframe(_hbt_show, use_container_width=True, hide_index=True, height=520)
+            st.download_button(
+                "⬇️ Nəticələri CSV yüklə",
+                data=_hbt_show.to_csv(index=False).encode("utf-8-sig"),
+                file_name="historical_backtest.csv",
+                mime="text/csv",
+                key="hbt_csv_v1",
+            )
+        else:
+            st.warning("Seçilmiş tarix aralığında şərtlərə uyğun proqnoz tapılmadı. Bu, həmin günlərdə oyun olmadığı anlamına gəlməyə bilər.")
+
+        st.caption(
+            "Qeyd: Bu, sadə tarixi statistik backtest-dir; gələcək nəticələrə zəmanət vermir. "
+            "Dəqiqlik yalnız yaradılmış və nəticəsi məlum olan proqnozlar üzrə hesablanır. "
+            "Qol və künc bazarlarının nəticələri ayrıca cədvəldə göstərilir."
+        )
