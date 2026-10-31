@@ -4965,6 +4965,14 @@ def _af_hit(cat, one, nm, side):
         return None
 
 
+# Bazar seçimi üçün sabit siyahı: (göstərilən ad, kataloqdakı filtr adı)
+_AF_MK = [('Matç 2.5 üst', 'Matç 2.5 üst'), ('Matç 2.5 alt', 'Matç 2.5 alt'),
+          ('Taym 0.5 üst', '1-ci hissə 0.5 üst'),
+          ('Künc 9.5 üst', 'Matç künc ≥ 10'), ('Künc 10.5 üst', 'Matç künc ≥ 11'), ('Künc 11.5 üst', 'Matç künc ≥ 12'),
+          ('Künc 9.5 alt', 'Matç künc ≤ 9'), ('Künc 10.5 alt', 'Matç künc ≤ 10'), ('Künc 11.5 alt', 'Matç künc ≤ 11')]
+_AF_MK_NAMES = {nm for _, nm in _AF_MK}
+
+
 def _af_run(d_from, d_to, sel_leagues, all_leagues, P, bar=None):
     G = _ah_games(d_from, d_to, sel_leagues, all_leagues)
     out = {'games': [], 'total': int(len(G)), 'no_hist': 0, 'no_pick': 0, 'no_odds': 0, 'P': dict(P), 'odds_on': False}
@@ -5040,6 +5048,7 @@ def _af_run(d_from, d_to, sel_leagues, all_leagues, P, bar=None):
             continue
         # ---- tək şərtlər: hər ailədən ən sərt olan ----
         best = {}
+        mk_all = {}
         for side, qq in q.items():
             for f in np.flatnonzero(qq):
                 nm = names[f]
@@ -5052,20 +5061,27 @@ def _af_run(d_from, d_to, sel_leagues, all_leagues, P, bar=None):
                       'ev': f'{int(kh[f])}/{int(nh[f])}' if side in ('M', 'Ev') else '—',
                       'qon': f'{int(ka[f])}/{int(na[f])}' if side in ('M', 'Qonaq') else '—',
                       'base': float(base[f]), 'sev': sev, 'odds': None, 'imp': None}
+                if side == 'M' and nm in _AF_MK_NAMES:
+                    mk_all[nm] = pk
                 key = (fm, side)
                 cur = best.get(key)
                 if cur is None or (sev, pk['rate']) > (cur['sev'], cur['rate']):
                     best[key] = pk
         picks = list(best.values())
+        mk_list = list(mk_all.values())
         if omask is not None:
-            for pk in picks:
+            for pk in picks + [x for x in mk_list if not any(x is y for y in picks)]:
                 pk['odds'] = _af_odds_stat(OM, omask, [pk['f']], pk['side'])
                 lab = {'Matç 2.5 üst': 'Üst 2.5', 'Matç 2.5 alt': 'Alt 2.5'}.get(pk['nm'])
                 if lab:
                     g2 = {s: fdrow.get(f'{book}_{s}') for s in 'hdaou'}
                     pk['imp'] = _fdo_implied(lab, g2)
             if req_odds:
-                picks = [p for p in picks if p['odds'] and p['odds'][1] >= 20 and p['odds'][0] / p['odds'][1] >= min_odds]
+                _okf = lambda p: p['odds'] and p['odds'][1] >= 20 and p['odds'][0] / p['odds'][1] >= min_odds
+                picks = [p for p in picks if _okf(p)]
+                mk_list = [p for p in mk_list if _okf(p)]
+        if not picks and mk_list:
+            picks = list(mk_list)
         if not picks:
             out['no_pick'] += 1
             continue
@@ -5097,13 +5113,13 @@ def _af_run(d_from, d_to, sel_leagues, all_leagues, P, bar=None):
         done = pd.notna(r.get('ft_home')) and pd.notna(r.get('ft_away'))
         if done:
             one = pd.DataFrame([{c: r.get(c) for c in _AH_OCOLS}])
-            for p in picks:
+            for p in picks + [x for x in mk_list if not any(x is y for y in picks)]:
                 p['res'] = _af_hit(cat, one, p['nm'], p['side'])
             if combo:
                 hs_ = [_af_hit(cat, one, names[f], 'M') for f in combo['fs']]
                 combo['res'] = None if any(h is None for h in hs_) else all(hs_)
         out['games'].append({'day': day, 'time': r['time'], 'home': r['home'], 'away': r['away'], 'league': r['league'],
-                             'score': score, 'n_evid': int(n_evid), 'picks': picks, 'combo': combo,
+                             'score': score, 'n_evid': int(n_evid), 'picks': picks, 'mk': {x['nm']: x for x in mk_list}, 'combo': combo,
                              'chosen': [c['label'] for c in chosen], 'done': bool(done),
                              'score_txt': (f"{int(r['ft_home'])}–{int(r['ft_away'])}" if done else ''),
                              'fd': ({s: fdrow.get(f'{book}_{s}') for s in 'hdaou'} if fdrow is not None else None),
@@ -5268,6 +5284,48 @@ def render_auto_finder(sel_leagues, all_leagues):
             st.caption('ℹ️ Koeffisient məlumatı yoxdur, yoxlama aparılmadı.')
         if not games:
             st.warning('Heç bir oyun tapılmadı. Minimum faizi və ya "Minimum yoxlanmış oyun"u azalt, "Mənasız şərtləri gizlət"i söndür, tarix aralığını dəyiş.')
+            return
+        # ---- bazar seçimi: yalnız seçilən bazarı olan oyunlar ----
+        st.session_state.setdefault('af_mk_open', False)
+        if st.button(('▼ ' if st.session_state['af_mk_open'] else '▶ ') + '🎯 Bazar seç (quşla)', key='af_mk_btn', use_container_width=True):
+            st.session_state['af_mk_open'] = not st.session_state['af_mk_open']
+            st.rerun()
+        if st.session_state['af_mk_open']:
+            def _mk_all(v):
+                for i_ in range(len(_AF_MK)):
+                    st.session_state[f'af_mk_{i_}'] = v
+            b1_, b2_ = st.columns(2)
+            b1_.button('✅ Hamısı', key='af_mk_all', on_click=_mk_all, args=(True,), use_container_width=True)
+            b2_.button('⬜ Təmizlə', key='af_mk_none', on_click=_mk_all, args=(False,), use_container_width=True)
+            mc1_, mc2_ = st.columns(2)
+            for i_, (lab_, _nm) in enumerate(_AF_MK):
+                (mc1_ if i_ % 2 == 0 else mc2_).checkbox(lab_, key=f'af_mk_{i_}')
+        sel_mk = [nm for i_, (_l, nm) in enumerate(_AF_MK) if st.session_state.get(f'af_mk_{i_}')]
+        if sel_mk:
+            lab_of = {nm: _l for _l, nm in _AF_MK}
+            fgames = []
+            for g in games:
+                ps = [g['mk'][nm] for nm in sel_mk if nm in g.get('mk', {})]
+                if ps:
+                    ps.sort(key=lambda p: (-p['rate'], p['base']))
+                    fgames.append(dict(g, picks=ps, combo=None, chosen=[], score=max(p['rate'] for p in ps),
+                                       n_evid=max(p['n'] for p in ps)))
+            fgames.sort(key=lambda g: (-round(g['score'], 6), -g['n_evid'], -len(g['picks'])))
+            st.markdown(f"**🎯 Seçilmiş bazarlar:** {', '.join(lab_of[n_] for n_ in sel_mk)} · uyğun oyun: **{len(fgames)}** / {len(games)}")
+            if not fgames:
+                st.warning('Seçilmiş bazarlardan heç biri bu oyunlarda şərti ödəmir.')
+                return
+            fin_ = [p['res'] for g in fgames for p in g['picks'] if g['done'] and p.get('res') is not None]
+            if fin_:
+                st.info(f'Bitmiş oyunlarda seçilmiş bazarlar: {sum(fin_)}/{len(fin_)} ({100 * sum(fin_) / len(fin_):.0f}%) tutub.')
+            bk_ = FDO_BOOKS[R['P']['book']][0] if R['P'].get('book') in FDO_BOOKS else ''
+            for g in fgames[:200]:
+                tm = g['time'] if isinstance(g['time'], str) and g['time'] else '--:--'
+                tags = ' · '.join(f"{lab_of[p['nm']]} {_af_fmt(p['rate'])}" for p in g['picks'])
+                with st.expander(f"{pd.Timestamp(g['day']):%d.%m} {tm} · {g['home']} – {g['away']} · {tags}"):
+                    _af_game_body(g, bk_)
+            if len(fgames) > 200:
+                st.caption(f'{len(fgames) - 200} oyun daha var: tarix aralığını daralt.')
             return
         # ---- keçmiş yoxlama: bitmiş oyunlarda neçə faiz tutub ----
         fin = [g for g in games if g['done']]
