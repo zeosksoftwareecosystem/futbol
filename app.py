@@ -5477,3 +5477,168 @@ with st.expander('Məlumat bazası haqqında'):
         if fd_only_teams:
             st.write(f'Yalnız football-data.co.uk-də tapılan komandalar: {len(fd_only_teams)}. Əgər bunların arasında Open Matchday-də başqa cür yazılan komanda varsa, app.py-dakı ALIASES siyahısına əlavə et.')
             st.code('\n'.join(fd_only_teams))
+
+# =====================================================================================
+# 🧠 MATCH INTELLIGENCE — müstəqil proqnoz bölməsi
+# Mövcud filtrlərdən ayrı işləyir; fixtures/results bazasından istifadə edir.
+# =====================================================================================
+def _mi_team_history(team_k, day, n_last):
+    if results.empty or not team_k:
+        return results.iloc[0:0].copy()
+    d = results[pd.to_datetime(results['date'], errors='coerce') < pd.Timestamp(day)].copy()
+    m = (d['home_k'].astype(str) == str(team_k)) | (d['away_k'].astype(str) == str(team_k))
+    d = d.loc[m].sort_values('date', ascending=False)
+    return d.head(int(n_last))
+
+
+def _mi_smooth_rate(hits, count, base, prior=4.0):
+    if count <= 0:
+        return float(base) if pd.notna(base) else None
+    b = float(base) if pd.notna(base) else 0.5
+    return (float(hits) + prior * b) / (float(count) + prior)
+
+
+def _mi_team_metrics(team_k, day, n_last, league):
+    h = _mi_team_history(team_k, day, n_last)
+    if h.empty:
+        return {'n': 0}
+    is_home = h['home_k'].astype(str) == str(team_k)
+    gf = pd.to_numeric(h['ft_home'], errors='coerce').where(is_home, pd.to_numeric(h['ft_away'], errors='coerce'))
+    ga = pd.to_numeric(h['ft_away'], errors='coerce').where(is_home, pd.to_numeric(h['ft_home'], errors='coerce'))
+    total = pd.to_numeric(h['ft_home'], errors='coerce') + pd.to_numeric(h['ft_away'], errors='coerce')
+    valid = total.notna()
+    btts = (pd.to_numeric(h['ft_home'], errors='coerce') > 0) & (pd.to_numeric(h['ft_away'], errors='coerce') > 0)
+    ch = pd.to_numeric(h['home_corners'], errors='coerce')
+    ca = pd.to_numeric(h['away_corners'], errors='coerce')
+    corners = ch + ca
+    cv = corners.notna()
+    # Liqa bazası varsa az nümunəli komanda göstəricilərini ona doğru yumşaldırıq.
+    lg = results[results['league'].astype(str) == str(league)] if 'league' in results.columns else results.iloc[0:0]
+    if len(lg) < 100:
+        lg = results
+    ltotal = pd.to_numeric(lg.get('ft_home'), errors='coerce') + pd.to_numeric(lg.get('ft_away'), errors='coerce')
+    base_o25 = float((ltotal > 2.5).mean()) if ltotal.notna().any() else 0.50
+    lbt = (pd.to_numeric(lg.get('ft_home'), errors='coerce') > 0) & (pd.to_numeric(lg.get('ft_away'), errors='coerce') > 0)
+    base_btts = float(lbt.mean()) if len(lbt) else 0.50
+    lhc = pd.to_numeric(lg.get('home_corners'), errors='coerce')
+    lac = pd.to_numeric(lg.get('away_corners'), errors='coerce')
+    lcn = lhc + lac
+    base_corners = {x: float((lcn > x).mean()) for x in (8.5, 9.5, 10.5) if lcn.notna().any()}
+    n = int(valid.sum())
+    scored_n = int(gf.notna().sum())
+    conceded_n = int(ga.notna().sum())
+    out = {
+        'n': n,
+        'over25': _mi_smooth_rate(int((total[valid] > 2.5).sum()), n, base_o25),
+        'btts': _mi_smooth_rate(int(btts[valid].sum()), n, base_btts),
+        'score': _mi_smooth_rate(int((gf.dropna() > 0).sum()), scored_n, base_btts),
+        'concede': _mi_smooth_rate(int((ga.dropna() > 0).sum()), conceded_n, base_btts),
+    }
+    for line in (8.5, 9.5, 10.5):
+        cn = int(cv.sum())
+        base = base_corners.get(line, 0.50)
+        out[f'corner_{line}'] = _mi_smooth_rate(int((corners[cv] > line).sum()), cn, base) if cn else None
+        out[f'corner_n_{line}'] = cn
+    return out
+
+
+def _mi_fixture_odds(home, away, day, book='avg'):
+    try:
+        _hist, fix = _fdo_load(_fdo_sig())
+        if fix.empty:
+            return None
+        d = pd.Timestamp(day).normalize()
+        cand = fix[(fix['date'] >= d - pd.Timedelta(days=1)) & (fix['date'] <= d + pd.Timedelta(days=1))]
+        for _, row in cand.iterrows():
+            if names_compatible(home, row['home']) and names_compatible(away, row['away']):
+                g = {s: row.get(f'{book}_{s}') for s in 'hdaou'}
+                po = _fdo_implied('Üst 2.5', g)
+                pu = _fdo_implied('Alt 2.5', g)
+                if po is not None and pu is not None:
+                    return {'over': po / 100.0, 'under': pu / 100.0, 'book': FDO_BOOKS[book][0]}
+    except Exception:
+        return None
+    return None
+
+
+def _mi_analyze(day, n_last, min_prob, min_sample):
+    games = _ah_games(day, day, set(), True)
+    if games.empty:
+        return [], 0
+    out = []
+    for _, g in games.iterrows():
+        home, away = str(g['home']), str(g['away'])
+        hk, ak = str(g['home_k']), str(g['away_k'])
+        league = str(g.get('league', ''))
+        hm = _mi_team_metrics(hk, day, n_last, league)
+        am = _mi_team_metrics(ak, day, n_last, league)
+        if hm.get('n', 0) < min_sample or am.get('n', 0) < min_sample:
+            continue
+        # Qol 2.5: iki komandanın son oyunlarında Üst faizi; Alt onun tamamlayıcısıdır.
+        po = (hm['over25'] + am['over25']) / 2
+        # BTTS: evin qol vurma ehtimalı × səfərin qol buraxma ehtimalı və əksi.
+        pb = (hm['score'] * am['concede'] + am['score'] * hm['concede']) / 2
+        odds = _mi_fixture_odds(home, away, day)
+        if odds:
+            po = 0.55 * po + 0.45 * odds['over']
+        markets = [
+            ('Qol', 'Üst 2.5', po, min(hm['n'], am['n'])),
+            ('Qol', 'Alt 2.5', 1 - po, min(hm['n'], am['n'])),
+            ('BTTS', 'Bəli', pb, min(hm['n'], am['n'])),
+            ('BTTS', 'Xeyr', 1 - pb, min(hm['n'], am['n'])),
+        ]
+        for line in (8.5, 9.5, 10.5):
+            hc, ac = hm.get(f'corner_{line}'), am.get(f'corner_{line}')
+            if hc is not None and ac is not None:
+                pc = (hc + ac) / 2
+                cn = min(hm.get(f'corner_n_{line}', 0), am.get(f'corner_n_{line}', 0))
+                if cn >= min_sample:
+                    markets += [('Künc', f'Üst {line}', pc, cn), ('Künc', f'Alt {line}', 1 - pc, cn)]
+        # Eyni xəttdə yalnız ehtimalı yüksək olan tərəfi saxla.
+        groups = {}
+        for grp, label, prob, sample in markets:
+            key = (grp, label.replace('Üst', '').replace('Alt', '').strip()) if grp == 'Künc' else (grp, 'main')
+            if key not in groups or prob > groups[key][2]:
+                groups[key] = (grp, label, prob, sample)
+        picks = [x for x in groups.values() if x[2] * 100 >= min_prob]
+        for grp, label, prob, sample in picks:
+            out.append({'day': day, 'time': g.get('time', ''), 'league': league, 'home': home, 'away': away,
+                        'market': grp, 'pick': label, 'prob': round(prob * 100, 1), 'sample': sample,
+                        'home_n': hm['n'], 'away_n': am['n'], 'odds': odds})
+    out.sort(key=lambda x: (x['prob'], x['sample']), reverse=True)
+    return out, len(games)
+
+
+with st.container(border=True, key='match_intelligence_section'):
+    st.markdown('## 🧠 MATCH INTELLIGENCE')
+    st.caption('AI FOOTBALL PREDICTION ENGINE · Bütün mövcud yarışlar üzrə statistik ehtimal sıralaması')
+    st.write('Əsas bazarlar: künc, 2.5 qol Üst/Alt və BTTS. Bu bölmə mövcud məlumat bazasını oxuyur və köhnə filtrlərin işinə qarışmır.')
+    mi1, mi2, mi3, mi4 = st.columns([1.2, 1, 1, 1])
+    mi_day = mi1.date_input('Oyun tarixi', value=baku_today(), key='mi_day')
+    mi_n = int(mi2.number_input('Komandanın son oyunları', min_value=5, max_value=30, value=10, step=1, key='mi_n'))
+    mi_min_sample = int(mi3.number_input('Minimum nümunə', min_value=3, max_value=15, value=5, step=1, key='mi_min_sample'))
+    mi_min_prob = int(mi4.slider('Minimum ehtimal (%)', min_value=50, max_value=90, value=65, step=1, key='mi_min_prob'))
+    mi_go = st.button('🚀 MATCH INTELLIGENCE ANALİZİNİ BAŞLAT', type='primary', use_container_width=True, key='mi_run')
+    if mi_go:
+        with st.spinner('Bütün oyunlar və tarixi göstəricilər təhlil edilir...'):
+            _mi_picks, _mi_total = _mi_analyze(mi_day, mi_n, mi_min_prob, mi_min_sample)
+        st.session_state['mi_result'] = {'picks': _mi_picks, 'total': _mi_total, 'day': mi_day,
+                                         'n': mi_n, 'min_prob': mi_min_prob}
+    _mi_R = st.session_state.get('mi_result')
+    if _mi_R:
+        st.divider()
+        st.markdown(f"**{_mi_R['day'].strftime('%d.%m.%Y')}** · {_mi_R['total']} oyun yoxlanıldı · {_mi_R['n']} son oyuna əsasən · minimum {_mi_R['min_prob']}%")
+        if not _mi_R['picks']:
+            st.warning('Bu şərtlərlə kifayət qədər güclü ehtimallı seçim tapılmadı. Minimum ehtimalı bir qədər azalt və ya başqa tarix seç.')
+        else:
+            for i, p in enumerate(_mi_R['picks'][:100], 1):
+                tm = p['time'] if isinstance(p['time'], str) and p['time'] else '--:--'
+                odds_note = f" · odds: {p['odds']['book']}" if p.get('odds') else ''
+                with st.expander(f"{i}. {p['prob']:.1f}% · {tm} · {p['home']} — {p['away']} · {p['market']}: {p['pick']}"):
+                    st.write(f"**Yarış:** {p['league']}")
+                    st.write(f"**Model ehtimalı:** {p['prob']:.1f}%")
+                    st.write(f"**Tarixi nümunə:** ev komandası {p['home_n']} oyun, qonaq komandası {p['away_n']} oyun")
+                    st.caption('Ehtimal son oyunların göstəricilərindən hesablanır; 2.5 qol bazarında mövcud olduqda Bet365 deyil, bazar ortalaması (Avg) marjasız ehtimalı ilə də qarışdırılır.' + odds_note)
+            if len(_mi_R['picks']) > 100:
+                st.caption(f"Daha {len(_mi_R['picks']) - 100} seçim var; siyahıda ilk 100 ən yüksək ehtimala görə göstərilir.")
+        st.warning('Vacib: faizlər statistik model qiymətləndirməsidir, zəmanət və ya dəqiq nəticə deyil. Künc və BTTS bazarları üçün bukmeker koeffisienti bu versiyada ayrıca mövcud olmadıqda istifadə edilmir.')
