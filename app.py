@@ -5627,25 +5627,42 @@ def _mi_analyze(day, n_last, min_prob, min_sample):
     return out, len(games)
 
 
+def _mi_shift_date(state_key, offset):
+    # Oxlar yalnız uyğun tarixi bir gün dəyişir; analiz düyməsi basılmadan işə düşmür.
+    current_value = st.session_state.get(state_key, baku_today())
+    st.session_state[state_key] = current_value + timedelta(days=offset)
+
+
 with st.container(border=True, key='match_intelligence_section'):
     st.markdown('## 🧠 MATCH INTELLIGENCE')
     st.caption('AI FOOTBALL PREDICTION ENGINE · Seçilmiş tarix aralığında bütün mövcud yarışlar üzrə statistik ehtimal sıralaması')
-    st.write('Başlanğıc və son tarixi seç. Proqram həmin aralıqdakı keçmiş və gələcək oyunları fərqləndirmədən eyni siyahıda göstərəcək.')
+    st.write('Başlanğıc və son tarixi ayrı-ayrılıqda seç. Oxlarla hər tarixi bir gün geri və ya irəli dəyişə bilərsən. Keçmiş və gələcək oyunlar eyni nəticə siyahısında göstərilir.')
 
     mi_today = baku_today()
-    mi_default_end = mi_today + timedelta(days=7)
-    mi_range = st.date_input(
-        'Oyunların tarix aralığı (başlanğıc – bitiş)',
-        value=(mi_today, mi_default_end),
-        key='mi_unified_date_range_v1',
-        format='DD.MM.YYYY'
-    )
-    if isinstance(mi_range, (tuple, list)) and len(mi_range) == 2:
-        mi_start, mi_end = mi_range
-    elif isinstance(mi_range, (tuple, list)) and len(mi_range) == 1:
-        mi_start = mi_end = mi_range[0]
-    else:
-        mi_start = mi_end = mi_range
+    # Ayrı tarix seçiciləri: mobil ekranda da hər tarix öz oxları ilə bir sətirdə qalır.
+    st.session_state.setdefault('mi_start_date_v2', mi_today)
+    st.session_state.setdefault('mi_end_date_v2', mi_today + timedelta(days=7))
+
+    st.caption('Başlanğıc tarixi')
+    mi_from_left, mi_from_picker, mi_from_right = st.columns([0.55, 3.4, 0.55], gap='small')
+    mi_from_left.button('‹', key='mi_start_prev_v2', on_click=_mi_shift_date,
+                        args=('mi_start_date_v2', -1), help='Başlanğıc tarixini əvvəlki günə keçir')
+    mi_from_picker.date_input('Başlanğıc tarixi', key='mi_start_date_v2',
+                              format='DD.MM.YYYY', label_visibility='collapsed')
+    mi_from_right.button('›', key='mi_start_next_v2', on_click=_mi_shift_date,
+                         args=('mi_start_date_v2', 1), help='Başlanğıc tarixini növbəti günə keçir')
+
+    st.caption('Son tarix')
+    mi_to_left, mi_to_picker, mi_to_right = st.columns([0.55, 3.4, 0.55], gap='small')
+    mi_to_left.button('‹', key='mi_end_prev_v2', on_click=_mi_shift_date,
+                      args=('mi_end_date_v2', -1), help='Son tarixi əvvəlki günə keçir')
+    mi_to_picker.date_input('Son tarix', key='mi_end_date_v2',
+                            format='DD.MM.YYYY', label_visibility='collapsed')
+    mi_to_right.button('›', key='mi_end_next_v2', on_click=_mi_shift_date,
+                       args=('mi_end_date_v2', 1), help='Son tarixi növbəti günə keçir')
+
+    mi_start = st.session_state['mi_start_date_v2']
+    mi_end = st.session_state['mi_end_date_v2']
 
     mi_n = int(st.number_input('Hər komanda üçün nəzərə alınacaq son oyun sayı', min_value=5, max_value=30, value=10, step=1, key='mi_n_unified'))
     mi5, mi6 = st.columns(2)
