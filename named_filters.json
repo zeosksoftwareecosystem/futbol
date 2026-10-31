@@ -1,0 +1,39 @@
+{
+  "Son 3 oyun — Matç zərbə ≥ 22 + Klub zərbə ≥ 11": {
+    "n_games": 3,
+    "shots_match_on": true,
+    "min_shots_match": 22,
+    "shots_club_on": true,
+    "min_shots_club": 11,
+    "_meta_filters": [
+      "Matç zərbə ≥ 22",
+      "Klub zərbə ≥ 11"
+    ],
+    "_meta_n_games": 3,
+    "_meta_hits": 10,
+    "_meta_dates": "2026-10-25 → 2026-10-25"
+  },
+  "Son 2 oyun — Matç künc ≥ 10 + Klub künc ≥ 5 + Matç zərbə ≥ 22 + Klub zərbə ≥ 11 + Matç dəqiq zərbə ≥ 8": {
+    "n_games": 2,
+    "corners_match_on": true,
+    "min_corners_match": 10,
+    "corners_club_on": true,
+    "min_corners_club": 5,
+    "shots_match_on": true,
+    "min_shots_match": 22,
+    "shots_club_on": true,
+    "min_shots_club": 11,
+    "target_match_on": true,
+    "min_target_match": 8,
+    "_meta_filters": [
+      "Matç künc ≥ 10",
+      "Klub künc ≥ 5",
+      "Matç zərbə ≥ 22",
+      "Klub zərbə ≥ 11",
+      "Matç dəqiq zərbə ≥ 8"
+    ],
+    "_meta_n_games": 2,
+    "_meta_hits": 6,
+    "_meta_dates": "2026-10-16 → 2026-11-02"
+  }
+}
