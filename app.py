@@ -5608,7 +5608,9 @@ def _mi_analyze(day, n_last, min_prob, min_sample):
         league = str(g.get('league', ''))
         hm = _mi_team_metrics(hk, day, n_last, league)
         am = _mi_team_metrics(ak, day, n_last, league)
-        if hm.get('n', 0) < min_sample or am.get('n', 0) < min_sample:
+        # Minimum nümunə artıq bütün oyunu bloklamır. Komandaların ən azı
+        # bir əvvəlki nəticəsi olduqda qol/BTTS bazası hamarlaşdırılmış faizlə işləyir.
+        if hm.get('n', 0) < 1 or am.get('n', 0) < 1:
             continue
         # Qol 2.5: iki komandanın son oyunlarında Üst faizi; Alt onun tamamlayıcısıdır.
         po = (hm['over25'] + am['over25']) / 2
@@ -5627,7 +5629,9 @@ def _mi_analyze(day, n_last, min_prob, min_sample):
         # Qonağın gözlənilən küncü: səfərdə qazandığı + evin evdə buraxdığı.
         corner_n_home = min(hm.get('corner_home_n', 0), am.get('corner_away_n', 0))
         corner_n_away = min(am.get('corner_away_n', 0), hm.get('corner_home_n', 0))
-        if corner_n_home >= min_sample and corner_n_away >= min_sample:
+        # Künc bazası daha az nümunə ilə də işləsin: liqa ortalamasına
+        # prior smoothing tətbiq olunur. Hər iki tərəfdə ən azı 1 uyğun oyun tələb edilir.
+        if corner_n_home >= 1 and corner_n_away >= 1:
             exp_home = (hm['corner_home_for'] + am['corner_away_against']) / 2
             exp_away = (am['corner_away_for'] + hm['corner_home_against']) / 2
             expected_total = exp_home + exp_away
@@ -5636,13 +5640,9 @@ def _mi_analyze(day, n_last, min_prob, min_sample):
                 pc = _mi_corner_over_probability(expected_total, line)
                 if pc is not None:
                     markets += [('Künc', f'Üst {line}', pc, cn), ('Künc', f'Alt {line}', 1 - pc, cn)]
-        # Eyni xəttdə yalnız ehtimalı yüksək olan tərəfi saxla.
-        groups = {}
-        for grp, label, prob, sample in markets:
-            key = (grp, label.replace('Üst', '').replace('Alt', '').strip()) if grp == 'Künc' else (grp, 'main')
-            if key not in groups or prob > groups[key][2]:
-                groups[key] = (grp, label, prob, sample)
-        picks = [x for x in groups.values() if x[2] * 100 >= min_prob]
+        # Hər istiqamət ayrıca saxlanılır: Üst və Alt gizlədilmir.
+        # Eyni bazarın hər iki tərəfi də yalnız istifadəçinin faiz həddini keçərsə görünür.
+        picks = [x for x in markets if x[2] is not None and x[2] * 100 >= min_prob]
         for grp, label, prob, sample in picks:
             fh = pd.to_numeric(pd.Series([g.get('ft_home')]), errors='coerce').iloc[0]
             fa = pd.to_numeric(pd.Series([g.get('ft_away')]), errors='coerce').iloc[0]
@@ -5710,7 +5710,7 @@ with st.container(border=True, key='match_intelligence_section'):
 
     mi_n = int(st.number_input('Hər komanda üçün nəzərə alınacaq son oyun sayı', min_value=5, max_value=30, value=10, step=1, key='mi_n_unified'))
     mi5, mi6 = st.columns(2)
-    mi_min_sample = int(mi5.number_input('Minimum nümunə', min_value=3, max_value=15, value=5, step=1, key='mi_min_sample_unified'))
+    mi_min_sample = int(mi5.number_input('Minimum nümunə (məlumat göstəricisi)', min_value=1, max_value=15, value=3, step=1, key='mi_min_sample_unified'))
     mi_min_prob = int(mi6.slider('Minimum ehtimal (%)', min_value=50, max_value=90, value=65, step=1, key='mi_min_prob_unified'))
 
     mi_go = st.button('🚀 SEÇİLMİŞ TARİX ARALIĞINI ANALİZ ET', type='primary', use_container_width=True, key='mi_unified_run')
@@ -5747,7 +5747,7 @@ with st.container(border=True, key='match_intelligence_section'):
         )
         st.caption(f"Cəmi {len(picks)} seçim tapıldı · minimum ehtimal: {_mi_R['min_prob']}% · Bütün tarixlər vahid siyahıda, ehtimalı yüksəkdən aşağıya sıralanıb.")
         if not picks:
-            st.warning('Bu tarix aralığında seçdiyin ehtimal həddinə uyğun proqnoz tapılmadı. Tarix aralığını genişləndirə və ya minimum ehtimalı azalda bilərsən.')
+            st.warning('Bu tarix aralığında heç bir bazar seçdiyin minimum ehtimal həddinə çatmadı. Bu, oyunların analiz edilməməsi demək deyil: ehtimallar hesablanıb, sadəcə həddi keçməyib. Minimum ehtimalı aşağı sal və ya tarix aralığını genişləndir.')
         else:
             for i, item in enumerate(picks[:500], 1):
                 day_txt = pd.Timestamp(item['day']).strftime('%d.%m.%Y')
