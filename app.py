@@ -5503,27 +5503,47 @@ def _mi_team_metrics(team_k, day, n_last, league):
     if h.empty:
         return {'n': 0}
     is_home = h['home_k'].astype(str) == str(team_k)
-    gf = pd.to_numeric(h['ft_home'], errors='coerce').where(is_home, pd.to_numeric(h['ft_away'], errors='coerce'))
-    ga = pd.to_numeric(h['ft_away'], errors='coerce').where(is_home, pd.to_numeric(h['ft_home'], errors='coerce'))
-    total = pd.to_numeric(h['ft_home'], errors='coerce') + pd.to_numeric(h['ft_away'], errors='coerce')
+    fh = pd.to_numeric(h['ft_home'], errors='coerce')
+    fa = pd.to_numeric(h['ft_away'], errors='coerce')
+    gf = fh.where(is_home, fa)
+    ga = fa.where(is_home, fh)
+    total = fh + fa
     valid = total.notna()
-    btts = (pd.to_numeric(h['ft_home'], errors='coerce') > 0) & (pd.to_numeric(h['ft_away'], errors='coerce') > 0)
-    ch = pd.to_numeric(h['home_corners'], errors='coerce')
-    ca = pd.to_numeric(h['away_corners'], errors='coerce')
-    corners = ch + ca
-    cv = corners.notna()
-    # Liqa bazası varsa az nümunəli komanda göstəricilərini ona doğru yumşaldırıq.
-    lg = results[results['league'].astype(str) == str(league)] if 'league' in results.columns else results.iloc[0:0]
+    btts = (fh > 0) & (fa > 0)
+
+    # 99 bəzi mənbələrdə "statistika yoxdur" işarəsidir; real künc kimi qəbul edilmir.
+    ch = pd.to_numeric(h['home_corners'], errors='coerce').where(lambda x: x.between(0, 30))
+    ca = pd.to_numeric(h['away_corners'], errors='coerce').where(lambda x: x.between(0, 30))
+    corner_valid = ch.notna() & ca.notna()
+    # Komandanın öz qazandığı və rəqibə verdiyi künclər, oyun meydançasına görə ayrılır.
+    home_for = ch[is_home & corner_valid]
+    home_against = ca[is_home & corner_valid]
+    away_for = ca[(~is_home) & corner_valid]
+    away_against = ch[(~is_home) & corner_valid]
+
+    # Bütün liqa bazası yalnız proqnoz tarixindən əvvəlki oyunlardan qurulur.
+    hist_date = pd.to_datetime(results['date'], errors='coerce')
+    prior = results[hist_date < pd.Timestamp(day)].copy()
+    lg = prior[prior['league'].astype(str) == str(league)] if 'league' in prior.columns else prior.iloc[0:0]
     if len(lg) < 100:
-        lg = results
+        lg = prior
     ltotal = pd.to_numeric(lg.get('ft_home'), errors='coerce') + pd.to_numeric(lg.get('ft_away'), errors='coerce')
     base_o25 = float((ltotal > 2.5).mean()) if ltotal.notna().any() else 0.50
     lbt = (pd.to_numeric(lg.get('ft_home'), errors='coerce') > 0) & (pd.to_numeric(lg.get('ft_away'), errors='coerce') > 0)
     base_btts = float(lbt.mean()) if len(lbt) else 0.50
+
     lhc = pd.to_numeric(lg.get('home_corners'), errors='coerce')
     lac = pd.to_numeric(lg.get('away_corners'), errors='coerce')
-    lcn = lhc + lac
-    base_corners = {x: float((lcn > x).mean()) for x in (8.5, 9.5, 10.5) if lcn.notna().any()}
+    lhc = lhc.where(lhc.between(0, 30))
+    lac = lac.where(lac.between(0, 30))
+    lcv = lhc.notna() & lac.notna()
+    def _mean_or(series, fallback):
+        return float(series.mean()) if len(series.dropna()) else float(fallback)
+    base_h_for = _mean_or(lhc[lcv], 5.2)
+    base_h_against = _mean_or(lac[lcv], 5.0)
+    base_a_for = _mean_or(lac[lcv], 4.8)
+    base_a_against = _mean_or(lhc[lcv], 5.0)
+
     n = int(valid.sum())
     scored_n = int(gf.notna().sum())
     conceded_n = int(ga.notna().sum())
@@ -5533,13 +5553,29 @@ def _mi_team_metrics(team_k, day, n_last, league):
         'btts': _mi_smooth_rate(int(btts[valid].sum()), n, base_btts),
         'score': _mi_smooth_rate(int((gf.dropna() > 0).sum()), scored_n, base_btts),
         'concede': _mi_smooth_rate(int((ga.dropna() > 0).sum()), conceded_n, base_btts),
+        'corner_home_for': _mi_smooth_rate(home_for.sum(), len(home_for), base_h_for, prior=4.0),
+        'corner_home_against': _mi_smooth_rate(home_against.sum(), len(home_against), base_h_against, prior=4.0),
+        'corner_away_for': _mi_smooth_rate(away_for.sum(), len(away_for), base_a_for, prior=4.0),
+        'corner_away_against': _mi_smooth_rate(away_against.sum(), len(away_against), base_a_against, prior=4.0),
+        'corner_home_n': int(len(home_for)), 'corner_away_n': int(len(away_for)),
     }
-    for line in (8.5, 9.5, 10.5):
-        cn = int(cv.sum())
-        base = base_corners.get(line, 0.50)
-        out[f'corner_{line}'] = _mi_smooth_rate(int((corners[cv] > line).sum()), cn, base) if cn else None
-        out[f'corner_n_{line}'] = cn
     return out
+
+
+def _mi_corner_over_probability(expected, line, dispersion=8.0):
+    """Künc sayı üçün overdispersed negative-binomial ehtimalı; Poisson-dan daha elastikdir."""
+    import math
+    if expected is None or not np.isfinite(expected) or expected <= 0:
+        return None
+    r = float(dispersion)
+    p = r / (r + float(expected))
+    # P(X=k), sonra xəttdən böyük nəticələrin cəmi.
+    probs = []
+    for k in range(0, 61):
+        lp = math.lgamma(k + r) - math.lgamma(r) - math.lgamma(k + 1) + r * math.log(p) + k * math.log1p(-p)
+        probs.append(math.exp(lp))
+    cutoff = int(math.floor(float(line))) + 1
+    return float(min(0.995, max(0.005, sum(probs[cutoff:]))))
 
 
 def _mi_fixture_odds(home, away, day, book='avg'):
@@ -5587,12 +5623,18 @@ def _mi_analyze(day, n_last, min_prob, min_sample):
             ('BTTS', 'Bəli', pb, min(hm['n'], am['n'])),
             ('BTTS', 'Xeyr', 1 - pb, min(hm['n'], am['n'])),
         ]
-        for line in (8.5, 9.5, 10.5):
-            hc, ac = hm.get(f'corner_{line}'), am.get(f'corner_{line}')
-            if hc is not None and ac is not None:
-                pc = (hc + ac) / 2
-                cn = min(hm.get(f'corner_n_{line}', 0), am.get(f'corner_n_{line}', 0))
-                if cn >= min_sample:
+        # Ev tərəfinin gözlənilən küncü: evdə qazandığı + qonağın səfərdə buraxdığı.
+        # Qonağın gözlənilən küncü: səfərdə qazandığı + evin evdə buraxdığı.
+        corner_n_home = min(hm.get('corner_home_n', 0), am.get('corner_away_n', 0))
+        corner_n_away = min(am.get('corner_away_n', 0), hm.get('corner_home_n', 0))
+        if corner_n_home >= min_sample and corner_n_away >= min_sample:
+            exp_home = (hm['corner_home_for'] + am['corner_away_against']) / 2
+            exp_away = (am['corner_away_for'] + hm['corner_home_against']) / 2
+            expected_total = exp_home + exp_away
+            cn = min(corner_n_home, corner_n_away)
+            for line in (8.5, 9.5, 10.5):
+                pc = _mi_corner_over_probability(expected_total, line)
+                if pc is not None:
                     markets += [('Künc', f'Üst {line}', pc, cn), ('Künc', f'Alt {line}', 1 - pc, cn)]
         # Eyni xəttdə yalnız ehtimalı yüksək olan tərəfi saxla.
         groups = {}
@@ -5606,6 +5648,8 @@ def _mi_analyze(day, n_last, min_prob, min_sample):
             fa = pd.to_numeric(pd.Series([g.get('ft_away')]), errors='coerce').iloc[0]
             hc_actual = pd.to_numeric(pd.Series([g.get('home_corners')]), errors='coerce').iloc[0]
             ac_actual = pd.to_numeric(pd.Series([g.get('away_corners')]), errors='coerce').iloc[0]
+            if pd.notna(hc_actual) and not 0 <= float(hc_actual) <= 30: hc_actual = np.nan
+            if pd.notna(ac_actual) and not 0 <= float(ac_actual) <= 30: ac_actual = np.nan
             settled = None
             if pd.notna(fh) and pd.notna(fa):
                 if grp == 'Qol':
@@ -5620,7 +5664,7 @@ def _mi_analyze(day, n_last, min_prob, min_sample):
                     settled = total_corners > line if 'Üst' in label else total_corners < line
             out.append({'day': day, 'time': g.get('time', ''), 'league': league, 'home': home, 'away': away,
                         'market': grp, 'pick': label, 'prob': round(prob * 100, 1), 'sample': sample,
-                        'home_n': hm['n'], 'away_n': am['n'], 'odds': odds,
+                        'home_n': hm['n'], 'away_n': am['n'], 'corner_home_n': hm.get('corner_home_n', 0), 'corner_away_n': am.get('corner_away_n', 0), 'odds': odds,
                         'ft_home': fh, 'ft_away': fa, 'home_corners': hc_actual,
                         'away_corners': ac_actual, 'hit': settled})
     out.sort(key=lambda x: (x['prob'], x['sample']), reverse=True)
@@ -5720,7 +5764,11 @@ with st.container(border=True, key='match_intelligence_section'):
                 with st.expander(f"{i}. {item['prob']:.1f}% · {day_txt} {tm} · {item['home']} — {item['away']} · {item['market']}: {item['pick']} · {status}"):
                     st.write(f"**Yarış:** {item['league']}")
                     st.write(f"**Model ehtimalı:** {item['prob']:.1f}%")
-                    st.write(f"**Tarixi nümunə:** ev komandası {item['home_n']} oyun, qonaq komandası {item['away_n']} oyun")
+                    
+                    if item['market'] == 'Künc':
+                        st.write(f"**Künc statistikası nümunəsi:** ev komandasının ev oyunları {item.get('corner_home_n', 0)}, qonaq komandasının səfər oyunları {item.get('corner_away_n', 0)}")
+                    else:
+                        st.write(f"**Tarixi nümunə:** ev komandası {item['home_n']} oyun, qonaq komandası {item['away_n']} oyun")
                     score_txt = f"{int(item['ft_home'])} : {int(item['ft_away'])}" if has_result else 'Hələ nəticə yoxdur'
                     st.write(f"**Faktiki hesab:** {score_txt}")
                     if pd.notna(item.get('home_corners')) and pd.notna(item.get('away_corners')):
