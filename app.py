@@ -5637,17 +5637,17 @@ with st.container(border=True, key='match_intelligence_section'):
     if 'mi_day' not in st.session_state:
         st.session_state['mi_day'] = baku_today()
 
-    nav1, nav2, nav3, nav4 = st.columns([0.55, 2.2, 0.55, 1.2])
+    # Compact previous/next controls directly beside the single-day picker.
+    nav1, nav2, nav3 = st.columns([0.38, 3.0, 0.38], gap='small')
     with nav1:
-        st.button('←', key='mi_prev_day', help='Əvvəlki gün', use_container_width=True,
+        st.button('‹', key='mi_prev_day', help='Əvvəlki gün', use_container_width=True,
                   on_click=lambda: st.session_state.update(mi_day=st.session_state.get('mi_day', baku_today()) - timedelta(days=1)))
     with nav2:
         mi_day = st.date_input('Oyun tarixi', key='mi_day')
     with nav3:
-        st.button('→', key='mi_next_day', help='Növbəti gün', use_container_width=True,
+        st.button('›', key='mi_next_day', help='Növbəti gün', use_container_width=True,
                   on_click=lambda: st.session_state.update(mi_day=st.session_state.get('mi_day', baku_today()) + timedelta(days=1)))
-    with nav4:
-        mi_n = int(st.number_input('Son oyun sayı', min_value=5, max_value=30, value=10, step=1, key='mi_n'))
+    mi_n = int(st.number_input('Son oyun sayı', min_value=5, max_value=30, value=10, step=1, key='mi_n'))
 
     mi5, mi6 = st.columns(2)
     mi_min_sample = int(mi5.number_input('Minimum nümunə', min_value=3, max_value=15, value=5, step=1, key='mi_min_sample'))
@@ -5656,9 +5656,14 @@ with st.container(border=True, key='match_intelligence_section'):
     if mi_mode == 'Keçmiş oyunlarda nəticələrin yoxlanması':
         default_end = baku_today() - timedelta(days=1)
         default_start = default_end - timedelta(days=29)
-        if 'mi_backtest_range' not in st.session_state:
-            st.session_state['mi_backtest_range'] = (default_start, default_end)
-        mi_range = st.date_input('Yoxlanılacaq tarix aralığı', key='mi_backtest_range')
+        # Use a fresh widget key and an explicit two-date value. Streamlit then
+        # opens a date-range picker instead of a single-date picker.
+        mi_range = st.date_input(
+            'Yoxlanılacaq tarix aralığı (başlanğıc – bitiş)',
+            value=(default_start, default_end),
+            key='mi_backtest_range_v2',
+            format='DD.MM.YYYY'
+        )
         if isinstance(mi_range, (tuple, list)) and len(mi_range) == 2:
             mi_start, mi_end = mi_range
         else:
