@@ -4525,7 +4525,8 @@ def _fdo_read(path):
         'home': df['HomeTeam'].astype(str).str.strip(),
         'away': df['AwayTeam'].astype(str).str.strip(),
     })
-    for src, dst in (('FTHG', 'hg'), ('FTAG', 'ag'), ('HC', 'hc'), ('AC', 'ac')):
+    for src, dst in (('FTHG', 'hg'), ('FTAG', 'ag'), ('HC', 'hc'), ('AC', 'ac'), ('HTHG', 'hth'), ('HTAG', 'hta'),
+                     ('HS', 'hsh'), ('AS', 'ash'), ('HST', 'hot'), ('AST', 'aot')):
         out[dst] = pd.to_numeric(df[src], errors='coerce') if src in df.columns else np.nan
     for key, (_nm, slots) in FDO_BOOKS.items():
         for slot, cands in slots.items():
@@ -4817,6 +4818,495 @@ def render_odds_stats():
                'Koeffisient aşağı olan bazarın (məs. Üst 1.5) faizi yüksək çıxması normaldır, çünki bukmeker onu artıq qiymətə qatıb. Real maraqlı olan faiz bukmeker ehtimalından yüksək olan hallardır (Fərq sütunu).')
 
 
+# =====================================================================================
+# 🤖 AVTO OYUN TAP (kənar panel)
+# Seçilmiş tarix aralığındakı BÜTÜN oyunlara baxır. Səhifədəki bütün filtr kataloqundan (qol, 1-ci hissə, BTTS,
+# künc, zərbə, klub filtrləri) hər oyun üçün hər iki komandanın son oyunlarında 100% / 95%+ tutanları özü seçir,
+# istədiyi qədər şərti birləşdirir, koeffisientlə (football-data.co.uk) də yoxlayır və oyunları faizə görə düzür.
+# Mövcud bölmələrə toxunmur: "results" bazasını (bütün mənbələr) və _ah_catalog() filtrlərini oxuyur.
+# =====================================================================================
+_AF_LOOK = 80                    # hər komanda üçün ən çox neçə keçmiş oyun yüklənsin (son N "statistikası olan" oyun bundan seçilir)
+_AF_ODDS_TOL0, _AF_ODDS_TOLMAX, _AF_ODDS_MIN_N = 0.08, 0.25, 30     # koeffisient-oxşar oyunlar üçün tolerans və minimum say
+_AF_MAX_DAYS = 31
+
+
+def _af_build(df):
+    """Hər filtr üçün (ev tərəf tutur, qonaq tərəf tutur, məlumat var) massivləri: F × N."""
+    cat, fam = _ah_catalog()
+    names = list(cat)
+    n = len(df)
+    HH = np.zeros((len(names), n), bool)
+    HA = np.zeros((len(names), n), bool)
+    HS = np.zeros((len(names), n), bool)
+    for i, nm in enumerate(names):
+        p_h, p_a, has = cat[nm](df)
+        HS[i] = has.to_numpy(bool)
+        HH[i] = p_h.fillna(False).to_numpy(bool) & HS[i]
+        HA[i] = p_a.fillna(False).to_numpy(bool) & HS[i]
+    return {'names': names, 'fam': fam, 'HH': HH, 'HA': HA, 'HS': HS,
+            'is_match': np.array([not x.startswith('Klub') for x in names]), 'base': {}}
+
+
+@st.cache_resource(show_spinner=False, max_entries=2)
+def _af_matrices(_res, sig):
+    M = _af_build(_res)
+    M['league'] = _res['league'].astype(str).to_numpy() if 'league' in _res.columns else np.full(len(_res), '')
+    return M
+
+
+@st.cache_resource(show_spinner=False, max_entries=2)
+def _af_odds_mats(_oh, sig):
+    return _af_build(_oh)
+
+
+@st.cache_resource(show_spinner=False, max_entries=2)
+def _af_team_index(_res, sig):
+    """Hər komanda üçün oyunlar (tarix üzrə sıralı): sətir nömrəsi, gün, ev oynayıb-oynamadığı."""
+    n = len(_res)
+    d = pd.to_datetime(_res['date']).dt.normalize().to_numpy().astype('datetime64[D]').astype('int64')
+    teams = np.concatenate([_res['home_k'].to_numpy(object), _res['away_k'].to_numpy(object)])
+    rr = np.concatenate([np.arange(n), np.arange(n)])
+    is_h = np.concatenate([np.ones(n, bool), np.zeros(n, bool)])
+    dd = np.concatenate([d, d])
+    codes, uniq = pd.factorize(teams)
+    order = np.lexsort((rr, dd, codes))
+    codes, rr, is_h, dd = codes[order], rr[order], is_h[order], dd[order]
+    cut = np.flatnonzero(np.diff(codes)) + 1
+    starts = np.concatenate([[0], cut])
+    ends = np.concatenate([cut, [len(codes)]])
+    span = {uniq[codes[s]]: (int(s), int(e)) for s, e in zip(starts, ends) if codes[s] >= 0}
+    return {'span': span, 'rows': rr, 'day': dd, 'isH': is_h}
+
+
+def _af_team_ev(M, T, team, day_i, n_last):
+    """Komandanın bu gündən əvvəlki oyunlarında hər filtr üçün: tutan say (k), yoxlanan say (n) və tam matrislər."""
+    F = len(M['names'])
+    empty = {'k': np.zeros(F, int), 'n': np.zeros(F, int), 'HIT': np.zeros((F, 0), bool), 'VAL': np.zeros((F, 0), bool)}
+    se = T['span'].get(team)
+    if se is None:
+        return empty
+    s, e = se
+    hi = int(np.searchsorted(T['day'][s:e], day_i, side='left'))
+    lo = max(0, hi - _AF_LOOK)
+    if hi - lo <= 0:
+        return empty
+    rows = T['rows'][s:e][lo:hi][::-1]          # ən yenidən köhnəyə
+    is_h = T['isH'][s:e][lo:hi][::-1]
+    HIT = np.where(is_h[None, :], M['HH'][:, rows], M['HA'][:, rows])
+    VAL = M['HS'][:, rows]
+    sel = VAL & (np.cumsum(VAL, axis=1) <= n_last)   # statistikası olan SON n_last oyun
+    return {'k': (HIT & sel).sum(1), 'n': sel.sum(1), 'HIT': HIT, 'VAL': VAL}
+
+
+def _af_joint(ev, fidx, n_last):
+    """Seçilmiş filtrlərin HAMISI eyni oyunda birlikdə tutubmu: (tutan, yoxlanan)."""
+    VAL = ev['VAL'][fidx].all(axis=0)
+    HIT = ev['HIT'][fidx].all(axis=0)
+    sel = VAL & (np.cumsum(VAL) <= n_last)
+    return int((HIT & sel).sum()), int(sel.sum())
+
+
+def _af_base(M, league):
+    b = M['base'].get(league)
+    if b is None:
+        m = M['league'] == league
+        if int(m.sum()) < 200:
+            m = np.ones(len(M['league']), bool)
+        den = np.maximum(2 * M['HS'][:, m].sum(1), 1)
+        b = np.clip((M['HH'][:, m].sum(1) + M['HA'][:, m].sum(1)) / den, 0.001, 0.999)
+        M['base'][league] = b
+    return b
+
+
+def _af_label(nm, side):
+    if side == 'M':
+        return _ah_pretty(nm)
+    rest = nm[5:]
+    if rest.startswith('1-ci hissə '):
+        rest = '1-ci hissə qol ' + rest[len('1-ci hissə '):]
+    elif rest[:1].isdigit():
+        rest = 'qol ' + rest
+    return f'{side}: {_ah_pretty(rest)}'
+
+
+def _af_fmt(rate):
+    return '100%' if rate >= 0.99995 else f'{int(rate * 1000) / 10:.1f}%'
+
+
+def _af_odds_stat(OM, mask, fidx, side):
+    """Koeffisient-oxşar keçmiş oyunlarda bu şərt(lər)in tutma sayı: (tutan, say) və ya None."""
+    sel = mask.copy()
+    hit = np.ones(len(mask), bool)
+    for f in fidx:
+        sel &= OM['HS'][f]
+        hit &= (OM['HA'][f] if side == 'Qonaq' else OM['HH'][f])
+    n = int(sel.sum())
+    return None if n == 0 else (int((hit & sel).sum()), n)
+
+
+def _af_find_fd(fixk, day, hk, ak):
+    if fixk is None or fixk.empty:
+        return None
+    d = pd.Timestamp(day).normalize()
+    c = fixk[(fixk['date'] >= d - pd.Timedelta(days=1)) & (fixk['date'] <= d + pd.Timedelta(days=1))]
+    for _, x in c.iterrows():
+        if names_compatible(x['hk'], hk) and names_compatible(x['ak'], ak):
+            return x
+    return None
+
+
+def _af_hit(cat, one, nm, side):
+    try:
+        ph, pa, has = cat[nm](one)
+        if not bool(has.iloc[0]):
+            return None
+        return bool(pa.iloc[0] if side == 'Qonaq' else ph.iloc[0])
+    except Exception:
+        return None
+
+
+def _af_run(d_from, d_to, sel_leagues, all_leagues, P, bar=None):
+    G = _ah_games(d_from, d_to, sel_leagues, all_leagues)
+    out = {'games': [], 'total': int(len(G)), 'no_hist': 0, 'no_pick': 0, 'no_odds': 0, 'P': dict(P), 'odds_on': False}
+    if G.empty:
+        return out
+    sig = (len(results), str(results['date'].max()), 'af-v1')
+    M, T = _af_matrices(results, sig), _af_team_index(results, sig)
+    cat, _ = _ah_catalog()
+    names, fam = M['names'], M['fam']
+    n_last, n_min, thr, max_f = int(P['n_last']), int(P['n_min']), P['min_pct'] / 100.0, int(P['max_f'])
+    eps = 1e-9
+
+    # ---- koeffisient mənbəsi (eyni football-data.co.uk) ----
+    OM = fixk = None
+    ocols = None
+    book = P.get('book')
+    if P['odds_mode'] != 'Söndür' and book in FDO_BOOKS:
+        hist, fix = _fdo_load(_fdo_sig())
+        if not hist.empty and not fix.empty and fix[f'{book}_h'].notna().any():
+            oh = pd.DataFrame({'ft_home': hist['hg'].to_numpy(), 'ft_away': hist['ag'].to_numpy(),
+                               'home_corners': hist['hc'].to_numpy(), 'away_corners': hist['ac'].to_numpy(),
+                               'ht_home': hist['hth'].to_numpy(), 'ht_away': hist['hta'].to_numpy(),
+                               'home_shots': hist['hsh'].to_numpy(), 'away_shots': hist['ash'].to_numpy(),
+                               'home_target': hist['hot'].to_numpy(), 'away_target': hist['aot'].to_numpy()})
+            OM = _af_odds_mats(oh, (len(hist), str(hist['date'].max()), 'afo-v2'))
+            ocols = {s: hist[f'{book}_{s}'].to_numpy(float) for s in 'hdaou'}
+            odiv = hist['div'].to_numpy(str)
+            fixk = fix.copy()
+            fixk['hk'] = _map_keys(fixk['home'])
+            fixk['ak'] = _map_keys(fixk['away'])
+            ladder = [_AF_ODDS_TOL0]
+            while ladder[-1] < _AF_ODDS_TOLMAX - 1e-9:
+                ladder.append(min(round(ladder[-1] * 1.2, 4), _AF_ODDS_TOLMAX))
+    out['odds_on'] = OM is not None
+    req_odds = P['odds_mode'] == 'Tələb et' and OM is not None
+    min_odds = P['min_odds'] / 100.0
+
+    total = len(G)
+    for gi, (_, r) in enumerate(G.iterrows()):
+        if bar is not None and gi % 5 == 0:
+            try:
+                bar.progress(min((gi + 1) / total, 1.0), text=f'{gi + 1} / {total} oyun yoxlanılır...')
+            except Exception:
+                pass
+        day = pd.Timestamp(r['_day']).normalize()
+        day_i = int(np.datetime64(day.date(), 'D').astype('int64'))
+        evh = _af_team_ev(M, T, r['home_k'], day_i, n_last)
+        eva = _af_team_ev(M, T, r['away_k'], day_i, n_last)
+        if evh['n'].max() == 0 and eva['n'].max() == 0:
+            out['no_hist'] += 1
+            continue
+        base = _af_base(M, str(r['league']))
+        kh, nh, ka, na = evh['k'], evh['n'], eva['k'], eva['n']
+        okh = (nh >= n_min) & (kh >= thr * nh - eps)
+        oka = (na >= n_min) & (ka >= thr * na - eps)
+        ism = M['is_match']
+        q = {'M': ism & okh & oka, 'Ev': (~ism) & okh, 'Qonaq': (~ism) & oka}
+        if P['hide_trivial']:
+            for s_ in q:
+                q[s_] = q[s_] & (base < P['triv'])
+        # ---- koeffisient-oxşar keçmiş oyunlar ----
+        omask = fdrow = None
+        if OM is not None:
+            fdrow = _af_find_fd(fixk, day, r['home_k'], r['away_k'])
+            if fdrow is not None:
+                g = {s: fdrow.get(f'{book}_{s}') for s in 'hdaou'}
+                g['div'] = fdrow['div']
+                omask, otol = _fdo_neighbors(ocols, g, ladder, _AF_ODDS_MIN_N, False, odiv)
+                if omask is None or int(omask.sum()) == 0:
+                    omask = None
+        if req_odds and omask is None:
+            out['no_odds'] += 1
+            continue
+        # ---- tək şərtlər: hər ailədən ən sərt olan ----
+        best = {}
+        for side, qq in q.items():
+            for f in np.flatnonzero(qq):
+                nm = names[f]
+                fm, sev = fam.get(nm, (nm, 0))
+                if side == 'M':
+                    k_, n_ = int(kh[f] + ka[f]), int(nh[f] + na[f])
+                else:
+                    k_, n_ = (int(kh[f]), int(nh[f])) if side == 'Ev' else (int(ka[f]), int(na[f]))
+                pk = {'f': int(f), 'nm': nm, 'side': side, 'label': _af_label(nm, side), 'rate': k_ / max(n_, 1), 'n': n_,
+                      'ev': f'{int(kh[f])}/{int(nh[f])}' if side in ('M', 'Ev') else '—',
+                      'qon': f'{int(ka[f])}/{int(na[f])}' if side in ('M', 'Qonaq') else '—',
+                      'base': float(base[f]), 'sev': sev, 'odds': None, 'imp': None}
+                key = (fm, side)
+                cur = best.get(key)
+                if cur is None or (sev, pk['rate']) > (cur['sev'], cur['rate']):
+                    best[key] = pk
+        picks = list(best.values())
+        if omask is not None:
+            for pk in picks:
+                pk['odds'] = _af_odds_stat(OM, omask, [pk['f']], pk['side'])
+                lab = {'Matç 2.5 üst': 'Üst 2.5', 'Matç 2.5 alt': 'Alt 2.5'}.get(pk['nm'])
+                if lab:
+                    g2 = {s: fdrow.get(f'{book}_{s}') for s in 'hdaou'}
+                    pk['imp'] = _fdo_implied(lab, g2)
+            if req_odds:
+                picks = [p for p in picks if p['odds'] and p['odds'][1] >= 20 and p['odds'][0] / p['odds'][1] >= min_odds]
+        if not picks:
+            out['no_pick'] += 1
+            continue
+        picks.sort(key=lambda p: (-p['rate'], p['base'], -p['n']))
+        # ---- birgə şərtlər (yalnız matç səviyyəli): istədiyi qədər filtr, hamısı eyni oyunlarda birlikdə tutmalıdır ----
+        chosen = []
+        for p in [x for x in picks if x['side'] == 'M']:
+            trial = [c['f'] for c in chosen] + [p['f']]
+            a_h, b_h = _af_joint(evh, trial, n_last)
+            a_a, b_a = _af_joint(eva, trial, n_last)
+            if not (b_h >= n_min and b_a >= n_min and a_h >= thr * b_h - eps and a_a >= thr * b_a - eps):
+                continue
+            od = None
+            if omask is not None:
+                od = _af_odds_stat(OM, omask, trial, 'M')
+                if req_odds and not (od and od[1] >= 20 and od[0] / od[1] >= min_odds):
+                    continue
+            chosen.append(p)
+            combo = {'fs': trial, 'k_h': a_h, 'n_h': b_h, 'k_a': a_a, 'n_a': b_a,
+                     'rate': (a_h + a_a) / max(b_h + b_a, 1), 'odds': od}
+            if len(chosen) >= max_f:
+                break
+        combo = combo if chosen else None
+        # ---- oyunun xalı ----
+        cand = [p['rate'] for p in picks] + ([combo['rate']] if combo else [])
+        score = max(cand)
+        n_evid = (combo['n_h'] + combo['n_a']) if combo else max(p['n'] for p in picks)
+        # ---- oyun bitibsə: tutub-tutmadığı ----
+        done = pd.notna(r.get('ft_home')) and pd.notna(r.get('ft_away'))
+        if done:
+            one = pd.DataFrame([{c: r.get(c) for c in _AH_OCOLS}])
+            for p in picks:
+                p['res'] = _af_hit(cat, one, p['nm'], p['side'])
+            if combo:
+                hs_ = [_af_hit(cat, one, names[f], 'M') for f in combo['fs']]
+                combo['res'] = None if any(h is None for h in hs_) else all(hs_)
+        out['games'].append({'day': day, 'time': r['time'], 'home': r['home'], 'away': r['away'], 'league': r['league'],
+                             'score': score, 'n_evid': int(n_evid), 'picks': picks, 'combo': combo,
+                             'chosen': [c['label'] for c in chosen], 'done': bool(done),
+                             'score_txt': (f"{int(r['ft_home'])}–{int(r['ft_away'])}" if done else ''),
+                             'fd': ({s: fdrow.get(f'{book}_{s}') for s in 'hdaou'} if fdrow is not None else None),
+                             'o_n': int(omask.sum()) if omask is not None else 0,
+                             'o_tol': float(otol) if omask is not None else 0.0})
+    out['games'].sort(key=lambda g: (-round(g['score'], 6), -g['n_evid'], -len(g['picks'])))
+    return out
+
+
+def _af_shift(key, days):
+    st.session_state[key] = st.session_state[key] + timedelta(days=days)
+
+
+def _af_toggle(on):
+    st.session_state['af_open'] = on
+
+
+def _af_css():
+    st.markdown("""<style>
+div.st-key-af_toggle { position: fixed !important; right: 0 !important; top: 38% !important; z-index: 100000 !important;
+  width: auto !important; margin: 0 !important; padding: 0 !important; filter: drop-shadow(0 6px 18px rgba(0,0,0,.28)); }
+div.st-key-af_toggle button { writing-mode: vertical-rl; min-height: 170px !important; min-width: 42px !important; padding: 10px 6px !important;
+  border-radius: 14px 0 0 14px !important; background: #1f2937 !important; border: 1.5px solid #16a34a !important; border-right: none !important;
+  white-space: nowrap !important; font-weight: 700 !important; }
+div.st-key-af_toggle button p, div.st-key-af_toggle button span { color: #f9fafb !important; }
+div.st-key-af_panel { position: fixed !important; top: 0 !important; right: 0 !important; bottom: 0 !important; left: auto !important;
+  width: min(540px, 100vw) !important; z-index: 100003 !important; overflow-y: auto !important; padding: 14px 14px 80px 14px !important;
+  background: #111827 !important; border-left: 1px solid rgba(128,128,128,.4) !important; box-shadow: -10px 0 35px rgba(0,0,0,.5) !important; }
+div.st-key-af_panel *:not(button):not(button *):not(input):not(svg):not(svg *) { color: #f9fafb !important; }
+div.st-key-af_panel [data-testid="stCaptionContainer"], div.st-key-af_panel [data-testid="stCaptionContainer"] * { color: #9ca3af !important; }
+div.st-key-af_panel input { color: #f9fafb !important; -webkit-text-fill-color: #f9fafb !important; }
+div.st-key-af_panel [data-baseweb="input"], div.st-key-af_panel [data-baseweb="base-input"], div.st-key-af_panel [data-baseweb="select"] > div { background: #1f2937 !important; }
+div.st-key-af_panel [data-baseweb="select"] * { color: #f9fafb !important; }
+div.st-key-af_panel button:not([kind="primary"]) { background: #1f2937 !important; color: #f9fafb !important; border: 1px solid rgba(255,255,255,.18) !important; }
+div.st-key-af_panel button:not([kind="primary"]) p { color: #f9fafb !important; }
+div.st-key-af_panel button[kind="primary"] p { color: #fff !important; }
+div.st-key-af_panel [data-testid="stExpander"] { background: rgba(255,255,255,.04) !important; border: 1px solid rgba(255,255,255,.16) !important; }
+div.st-key-af_panel [data-testid="stNumberInput"] button { background: #1f2937 !important; }
+@media (max-width: 600px) { div.st-key-af_toggle button { min-height: 130px !important; min-width: 36px !important; } }
+</style>""", unsafe_allow_html=True)
+
+
+def _af_game_body(g, book_name):
+    def f2(v):
+        return f'{v:.2f}' if v is not None and pd.notna(v) else '—'
+    head = f"**{g['league']}** · {pd.Timestamp(g['day']):%d.%m.%Y}" + (f" · nəticə **{g['score_txt']}**" if g['done'] else '')
+    st.markdown(head)
+    if g['fd']:
+        o = g['fd']
+        st.caption(f"Koeffisient ({book_name}): 1 → {f2(o['h'])} · X → {f2(o['d'])} · 2 → {f2(o['a'])} · Üst 2.5 → {f2(o['o'])} · Alt 2.5 → {f2(o['u'])}. "
+                   f"Oxşar koeffisientli keçmiş oyun: {g['o_n']} (tolerans ±{g['o_tol'] * 100:.0f}%).")
+    c = g['combo']
+    if c:
+        lab = ' + '.join(_ah_pretty(x) for x in g['chosen'])
+        od = f" · koef-oxşar keçmiş: {c['odds'][0]}/{c['odds'][1]} ({100 * c['odds'][0] / c['odds'][1]:.0f}%)" if c.get('odds') else ''
+        mark = (' ✅' if c.get('res') else (' ❌' if c.get('res') is False else '')) if g['done'] else ''
+        st.markdown(f"**🎯 Birgə ({len(g['chosen'])} şərt):** {lab}{mark}")
+        st.caption(f"Bu şərtlərin hamısı eyni oyunda birlikdə: Ev {c['k_h']}/{c['n_h']} · Qonaq {c['k_a']}/{c['n_a']} ({_af_fmt(c['rate'])}){od}")
+    rows = []
+    for p in sorted(g['picks'], key=lambda x: (-x['rate'], x['base'])):
+        od = f"{p['odds'][0]}/{p['odds'][1]} ({100 * p['odds'][0] / p['odds'][1]:.0f}%)" if p['odds'] else '—'
+        if p['imp'] is not None:
+            od += f" · bukm. {p['imp']:.0f}%"
+        mk = ''
+        if g['done']:
+            mk = '✅' if p.get('res') else ('❌' if p.get('res') is False else '·')
+        rows.append({'Şərt': p['label'], 'Ev': p['ev'], 'Qonaq': p['qon'], 'Faiz': _af_fmt(p['rate']),
+                     'Liqada': f"{p['base'] * 100:.0f}%", 'Koef-oxşar': od, 'Nəticə': mk})
+    cols = ['Şərt', 'Ev', 'Qonaq', 'Faiz', 'Liqada', 'Koef-oxşar'] + (['Nəticə'] if g['done'] else [])
+    st.markdown(_ah_html_table(cols, rows), unsafe_allow_html=True)
+    st.caption('Ev / Qonaq = komandanın statistikası olan son oyunlarında bu şərtin tutduğu say. "Liqada" = həmin liqada bu şərtin ümumi tutma faizi '
+               '(Faiz buna yaxındırsa, şərt əslində adi haldır). "Koef-oxşar" = bugünkü koeffisientlərə oxşar keçmiş oyunlarda tutma.')
+
+
+def render_auto_finder(sel_leagues, all_leagues):
+    _af_css()
+    if not st.session_state.get('af_open', False):
+        with st.container(key='af_toggle'):
+            st.button('🤖 Avto oyun tap', key='af_open_btn', on_click=_af_toggle, args=(True,))
+        return
+    with st.container(key='af_panel'):
+        h1, h2 = st.columns([5, 1])
+        h1.markdown('### 🤖 Avto oyun tap')
+        h2.button('✖', key='af_close', on_click=_af_toggle, args=(False,), help='Paneli bağla')
+        st.caption('Seçilmiş tarix aralığındakı bütün oyunlar yoxlanılır. Hər oyun üçün səhifədəki bütün filtrlərdən hər iki komandanın '
+                   'son oyunlarında 100% (sonra 95%+) tutanlar seçilir, istədiyi qədər şərt birləşdirilir və koeffisientlə də yoxlanır.')
+        today = baku_today()
+        st.session_state.setdefault('af_from', today)
+        st.session_state.setdefault('af_to', today)
+        for lab, key, row in (('Başlanğıc tarix', 'af_from', 'start_date_row_af'), ('Son tarix', 'af_to', 'end_date_row_af')):
+            st.caption(lab)
+            try:
+                box = st.container(key=row)
+            except TypeError:
+                box = st.container()
+            with box:
+                a, b, c = st.columns([1, 5, 1], gap='small')
+                a.button('◀', key=f'{key}_prev', on_click=_af_shift, args=(key, -1), use_container_width=True, help='Əvvəlki gün')
+                b.date_input(lab, key=key, label_visibility='collapsed')
+                c.button('▶', key=f'{key}_next', on_click=_af_shift, args=(key, 1), use_container_width=True, help='Növbəti gün')
+        p1, p2 = st.columns(2)
+        n_last = int(p1.number_input('Son neçə oyuna baxılsın', 3, 60, 20, key='af_n_last', help='Hər komandanın statistikası olan son N oyunu.'))
+        n_min = int(p2.number_input('Minimum yoxlanmış oyun', 3, 60, 12, key='af_n_min',
+                                    help='Komandanın bu şərt üçün statistikası olan oyunu bundan azdırsa, şərt nəzərə alınmır (məs. künc statistikası olmayan komandalar).'))
+        p3, p4 = st.columns(2)
+        min_pct = float(p3.number_input('Minimum faiz (%)', 50, 100, 95, key='af_min_pct',
+                                        help='Hər iki komanda üçün ayrıca bu faiz ödənməlidir. 95% və 10 oyunda bu, 10/10 deməkdir.'))
+        max_f = int(p4.number_input('Birgə şərt sayı (maks.)', 1, 10, 4, key='af_max_f',
+                                    help='Sistem bir oyun üçün bu qədərə qədər şərti birləşdirir, hamısı eyni oyunlarda birlikdə tutmalıdır.'))
+        q1, q2 = st.columns(2)
+        hide_trivial = q1.checkbox('Mənasız şərtləri gizlət', value=True, key='af_triv',
+                                   help='Liqada onsuz da çox tez-tez tutan şərtlər (məs. 92%+) siyahıya salınmır.')
+        only_open = q2.checkbox('Yalnız bitməmiş oyunlar', value=False, key='af_open_only')
+        triv = 0.92
+        hist_, fix_ = _fdo_load(_fdo_sig())
+        books = [k for k in FDO_BOOKS if not fix_.empty and f'{k}_h' in fix_.columns and fix_[f'{k}_h'].notna().any()
+                 and not hist_.empty and hist_[f'{k}_h'].notna().any()]
+        if books:
+            o1, o2, o3 = st.columns([2, 2, 2])
+            odds_mode = o1.selectbox('Koeffisient yoxlaması', ['Yalnız göstər', 'Tələb et', 'Söndür'], key='af_odds_mode',
+                                     help='Eyni football-data.co.uk mənbəsindən bugünkü koeffisientə oxşar keçmiş oyunlarda bu şərtlərin tutma faizi. '
+                                          '"Tələb et" seçilsə, koeffisienti olmayan oyunlar və faizi aşağı olan şərtlər atılır.')
+            book = o2.selectbox('Bukmeker', books, format_func=lambda k: FDO_BOOKS[k][0], key='af_book')
+            min_odds = float(o3.number_input('Koef-oxşar min. %', 0, 100, 60, key='af_min_odds', disabled=odds_mode != 'Tələb et'))
+        else:
+            odds_mode, book, min_odds = 'Söndür', None, 0.0
+            st.caption('Koeffisient məlumatı yüklənməyib (football-data.co.uk fixtures.csv). Yuxarıdakı "Məlumatı yenilə"dən sonra koeffisient yoxlaması da işləyəcək.')
+        d_from, d_to = st.session_state['af_from'], st.session_state['af_to']
+        P = {'n_last': n_last, 'n_min': min(n_min, n_last), 'min_pct': min_pct, 'max_f': max_f, 'hide_trivial': hide_trivial, 'triv': triv,
+             'odds_mode': odds_mode, 'book': book, 'min_odds': min_odds, 'only_open': only_open}
+        if st.button('🔎 Oyunları tap', key='af_go', type='primary', use_container_width=True):
+            if d_from > d_to:
+                st.error('Başlanğıc tarixi son tarixdən böyük ola bilməz.')
+            elif (d_to - d_from).days + 1 > _AF_MAX_DAYS:
+                st.error(f'Tarix aralığı ən çox {_AF_MAX_DAYS} gün ola bilər.')
+            else:
+                bar = st.progress(0.0, text='Oyunlar yüklənir...')
+                try:
+                    R = _af_run(d_from, d_to, sel_leagues, all_leagues, P, bar)
+                    R['range'] = (d_from, d_to)
+                    st.session_state['af_result'] = R
+                except Exception as e:
+                    st.session_state.pop('af_result', None)
+                    st.error(f'Xəta: {e}')
+                bar.empty()
+        R = st.session_state.get('af_result')
+        if not R:
+            return
+        games = [g for g in R['games'] if not (R['P'].get('only_open') and g['done'])]
+        a, b = R['range']
+        st.markdown(f"**{a:%d.%m.%Y} – {b:%d.%m.%Y}** · yoxlanan oyun: **{R['total']}** · tapılan: **{len(games)}**")
+        miss = []
+        if R['no_pick']:
+            miss.append(f"şərti ödəyən yoxdur: {R['no_pick']}")
+        if R['no_hist']:
+            miss.append(f"komandaların tarixçəsi yoxdur: {R['no_hist']}")
+        if R['no_odds']:
+            miss.append(f"koeffisienti tapılmayan: {R['no_odds']}")
+        if miss:
+            st.caption('Siyahıya düşməyənlər: ' + ' · '.join(miss))
+        if R['P']['odds_mode'] != 'Söndür' and not R['odds_on']:
+            st.caption('ℹ️ Koeffisient məlumatı yoxdur, yoxlama aparılmadı.')
+        if not games:
+            st.warning('Heç bir oyun tapılmadı. Minimum faizi və ya "Minimum yoxlanmış oyun"u azalt, "Mənasız şərtləri gizlət"i söndür, tarix aralığını dəyiş.')
+            return
+        # ---- keçmiş yoxlama: bitmiş oyunlarda neçə faiz tutub ----
+        fin = [g for g in games if g['done']]
+        if fin:
+            cs = [g['combo']['res'] for g in fin if g['combo'] and g['combo'].get('res') is not None]
+            ps = [p['res'] for g in fin for p in g['picks'] if p.get('res') is not None]
+            parts = []
+            if cs:
+                parts.append(f"birgə seçim {sum(cs)}/{len(cs)} ({100 * sum(cs) / len(cs):.0f}%)")
+            if ps:
+                bs_ = [p['base'] for g in fin for p in g['picks'] if p.get('res') is not None]
+                parts.append(f"tək şərtlər {sum(ps)}/{len(ps)} ({100 * sum(ps) / len(ps):.0f}%), həmin şərtlərin liqada adi tutması orta {100 * sum(bs_) / len(bs_):.0f}%")
+            if parts:
+                st.info('Bitmiş oyunlarda faktiki nəticə: ' + ' · '.join(parts) + '. Bu, üsulun real yoxlamasıdır: 95%+ qeydə alınan şərtlər gələcəkdə də eyni dəqiqliklə tutmaya bilər.')
+        book_name = FDO_BOOKS[R['P']['book']][0] if R['P'].get('book') in FDO_BOOKS else ''
+        if R['P']['n_last'] < 20 and R['P']['min_pct'] < 100:
+            st.caption('ℹ️ Son 10 oyunda 95% = 10/10 deməkdir, ona görə yalnız 100% pilləsi çıxır. 95–99% pilləsinin görünməsi üçün "Son neçə oyuna baxılsın"ı 20 və ya daha çox seç.')
+        tiers = [('🥇 100%', lambda s: s >= 0.99995), ('🥈 95% – 99.9%', lambda s: s < 0.99995)]
+        n100 = sum(1 for g in games if g['score'] >= 0.99995)
+        shown = 0
+        for ti, (tname, fn) in enumerate(tiers):
+            grp = [g for g in games if fn(g['score'])]
+            if not grp:
+                continue
+            if ti == 1:
+                tname = f"🥈 {R['P']['min_pct']:.0f}% – 99.9%"
+            st.markdown(f"##### {tname} · {len(grp)} oyun")
+            for g in grp[:150]:
+                shown += 1
+                tm = g['time'] if isinstance(g['time'], str) and g['time'] else '--:--'
+                nm_c = len(g['chosen'])
+                tail = f" · birgə {nm_c} şərt" if nm_c > 1 else (f" · {g['chosen'][0]}" if nm_c == 1 else f" · {g['picks'][0]['label']}")
+                head = f"{_af_fmt(g['score'])} · {pd.Timestamp(g['day']):%d.%m} {tm} · {g['home']} – {g['away']}{tail}"
+                with st.expander(head):
+                    _af_game_body(g, book_name)
+            if len(grp) > 150:
+                st.caption(f'{len(grp) - 150} oyun daha var: tarix aralığını daralt.')
+
+
 # Üzən kupon paneli və analiz düyməsi: kupon solda, analiz sağda.
 with st.container(key="coupon_float_button"):
     _coupon_count = len(st.session_state.get("football_coupon", []))
@@ -4898,6 +5388,8 @@ render_always_hit(date_from, date_to, sel_leagues, len(sel_leagues) >= len(leagu
 render_odds_stats()
 
 _ad_ui(date_from, date_to, sel_leagues, len(sel_leagues) >= len(league_options))
+
+render_auto_finder(sel_leagues, len(sel_leagues) >= len(league_options))
 
 with st.expander('Məlumat bazası haqqında'):
     show_info = st.checkbox('Ətraflı məlumatı göstər (yavaş ola bilər)', key='show_info', value=False)
