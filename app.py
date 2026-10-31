@@ -4112,6 +4112,286 @@ def render_analysis(A, cur_key):
                            file_name='futbol_filtri_neticeleri.csv', mime='text/csv')
 
 
+# ======================= AVTOMATİK FİLTR KƏŞFİYYATI (MÜSTƏQİL BÖLMƏ) =======================
+# Sistem yalnız oyundan əvvəl mövcud olan komanda forması göstəricilərindən kombinasiya yaradır.
+# Kombinasiyalar xronoloji train / validation / test hissələrində ayrıca yoxlanılır.
+# Heç bir tarixi 100% göstərici gələcək üçün zəmanət sayılmır.
+
+import itertools as _ad_itertools
+
+_AD_WINDOWS = (5, 10, 15)
+_AD_GROUPS = {
+    'Qollar': lambda n: ('künc' not in n and 'zərbə' not in n and 'dəqiq zərbə' not in n and '1-ci hissə' not in n),
+    'Künclər': lambda n: ('künc' in n),
+    '1-ci hissə': lambda n: ('1-ci hissə' in n),
+}
+
+
+def _ad_market_catalog(group):
+    cat, _ = _ah_catalog()
+    pred = _AD_GROUPS[group]
+    # Predictor-lar da yalnız istənilən üç istiqamətdən götürülür.
+    names = [n for n in cat if pred(n) or (group != 'Qollar' and 'künc' in n)]
+    # Həddən artıq oxşar və təkrarlanan xətləri məhdudlaşdırırıq.
+    return {n: cat[n] for n in names if 'zərbə' not in n and 'dəqiq zərbə' not in n}
+
+
+@st.cache_data(show_spinner=False, max_entries=2)
+def _ad_history_frame(_res, sig):
+    """Hər tarixi oyun üçün yalnız həmin təqvim günündən ƏVVƏL məlum olan komanda forması."""
+    cat, _ = _ah_catalog()
+    names = [n for n in cat if ('künc' in n or '1-ci hissə' in n or
+             (n.startswith('Matç ') and 'zərbə' not in n) or n.startswith('Klub '))]
+    names = [n for n in names if 'zərbə' not in n and 'dəqiq zərbə' not in n]
+    if _res.empty or not names:
+        return pd.DataFrame()
+    d = _res.copy().dropna(subset=['date', 'home_k', 'away_k', 'ft_home', 'ft_away'])
+    d['date'] = pd.to_datetime(d['date'], errors='coerce')
+    d = d.dropna(subset=['date']).sort_values('date', kind='stable').reset_index(drop=True)
+    outcomes = {}
+    for nm in names:
+        try:
+            ph, pa, has = cat[nm](d)
+            outcomes[nm] = (ph.fillna(False).to_numpy(dtype=bool),
+                            pa.fillna(False).to_numpy(dtype=bool),
+                            has.fillna(False).to_numpy(dtype=bool))
+        except Exception:
+            continue
+    names = [n for n in names if n in outcomes]
+    history = {}
+    rows = []
+    # Eyni gündə keçirilən oyunlar bir-birinin əvvəlki forması hesab edilmir.
+    for _, day_df in d.groupby(d['date'].dt.normalize(), sort=True):
+        pending = []
+        for i, g in day_df.iterrows():
+            hk, ak = str(g['home_k']), str(g['away_k'])
+            hh, ah = history.get(hk, {}), history.get(ak, {})
+            row = {'date': g['date'], 'home_k': hk, 'away_k': ak, 'league': str(g.get('league', ''))}
+            for side, team_hist in (('E', hh), ('Q', ah)):
+                for nm in names:
+                    vals = team_hist.get(nm, [])
+                    for w in _AD_WINDOWS:
+                        sample = vals[-w:]
+                        row[f'{side}|{nm}|{w}'] = (sum(sample) / len(sample)) if len(sample) >= max(4, w // 2) else np.nan
+            for nm in names:
+                ph, pa, has = outcomes[nm]
+                if not has[i]:
+                    continue
+                if nm.startswith('Klub '):
+                    row[f'EVT|{nm}|E'] = bool(ph[i])
+                    row[f'EVT|{nm}|Q'] = bool(pa[i])
+                else:
+                    row[f'EVT|{nm}|M'] = bool(ph[i])
+            rows.append(row)
+            pending.append((hk, ak, i))
+        # Günün bütün nəticələri yalnız növbəti günün oyunları üçün tarixçəyə daxil edilir.
+        for hk, ak, i in pending:
+            for nm in names:
+                ph, pa, has = outcomes[nm]
+                if has[i]:
+                    history.setdefault(hk, {}).setdefault(nm, []).append(bool(ph[i]))
+                    history.setdefault(ak, {}).setdefault(nm, []).append(bool(pa[i]))
+    return pd.DataFrame(rows)
+
+
+def _ad_candidate_features(r, day, hist, names):
+    """Gələcək oyun üçün onun tarixindən əvvəlki komanda nəticələrindən eyni feature-ləri çıxarır."""
+    day = pd.Timestamp(day).normalize()
+    past = results[results['date'].dt.normalize() < day].sort_values('date', kind='stable')
+    out = {}
+    for side, team in (('E', str(r['home_k'])), ('Q', str(r['away_k']))):
+        sub = past[(past['home_k'].astype(str) == team) | (past['away_k'].astype(str) == team)]
+        if sub.empty:
+            continue
+        sub = sub.tail(max(_AD_WINDOWS) * 3)
+        is_home = sub['home_k'].astype(str).eq(team).to_numpy()
+        for nm in names:
+            try:
+                ph, pa, has = _ah_catalog()[0][nm](sub)
+                vals = np.where(is_home, ph.fillna(False).to_numpy(), pa.fillna(False).to_numpy())
+                valid = has.fillna(False).to_numpy()
+                vals = vals[valid].astype(bool).tolist()
+            except Exception:
+                vals = []
+            for w in _AD_WINDOWS:
+                sample = vals[-w:]
+                if len(sample) >= max(4, w // 2):
+                    out[f'{side}|{nm}|{w}'] = sum(sample) / len(sample)
+    return out
+
+
+def _ad_atoms(train, target, min_support, min_train_rate, max_atoms=10):
+    """Təlim hissəsində güclü tək şərtləri seçir; nəticə/test hissəsinə baxmır."""
+    y = train[target].astype(bool)
+    atoms = []
+    for col in [c for c in train.columns if c.startswith(('E|', 'Q|'))]:
+        x = pd.to_numeric(train[col], errors='coerce')
+        for op, threshold in (('>=', .70), ('>=', .80), ('<=', .30), ('<=', .20)):
+            mask = x.ge(threshold) if op == '>=' else x.le(threshold)
+            mask = mask & x.notna()
+            n = int(mask.sum())
+            if n < min_support:
+                continue
+            hit = int(y[mask].sum())
+            rate = hit / n
+            if rate >= min_train_rate:
+                atoms.append((col, op, threshold, n, rate))
+    atoms.sort(key=lambda z: (z[4], z[3]), reverse=True)
+    return atoms[:max_atoms]
+
+
+def _ad_mask(df, combo):
+    m = pd.Series(True, index=df.index)
+    for col, op, threshold, *_ in combo:
+        x = pd.to_numeric(df[col], errors='coerce')
+        m &= (x.ge(threshold) if op == '>=' else x.le(threshold)) & x.notna()
+    return m
+
+
+def _ad_search_target(frame, target, min_support, min_train_rate, max_filters):
+    """Train-də kombinasiya axtarılır, validation-da bir seçim edilir, test yalnız sonda ölçülür."""
+    d = frame.dropna(subset=[target]).sort_values('date', kind='stable').reset_index(drop=True)
+    if len(d) < max(120, min_support * 5):
+        return []
+    n = len(d)
+    a, b = int(n * .60), int(n * .80)
+    train, val, test = d.iloc[:a], d.iloc[a:b], d.iloc[b:]
+    atoms = _ad_atoms(train, target, min_support, min_train_rate)
+    if not atoms:
+        return []
+    candidates = []
+    for k in range(1, min(max_filters, 4, len(atoms)) + 1):
+        for combo in _ad_itertools.combinations(atoms, k):
+            mt, mv = _ad_mask(train, combo), _ad_mask(val, combo)
+            nt, nv = int(mt.sum()), int(mv.sum())
+            if nt < min_support or nv < min_support:
+                continue
+            kt = int(train.loc[mt, target].astype(bool).sum())
+            kv = int(val.loc[mv, target].astype(bool).sum())
+            rt, rv = kt / nt, kv / nv
+            if rv >= .999999 and rt >= min_train_rate:
+                # Validation yalnız seçim üçündür; test göstəricisi seçimə təsir etmir.
+                candidates.append({'combo': combo, 'train': (kt, nt), 'validation': (kv, nv),
+                                   'val_score': (nv, -k, rt)})
+    if not candidates:
+        return []
+    candidates.sort(key=lambda x: x['val_score'], reverse=True)
+    # Validation-da ən çox nümunəni əhatə edən bir kombinasiya seçilir.
+    chosen = candidates[0]
+    ms = _ad_mask(test, chosen['combo'])
+    ns = int(ms.sum())
+    if ns < min_support:
+        return []
+    ks = int(test.loc[ms, target].astype(bool).sum())
+    if ks != ns:
+        return []
+    return [{'combo': chosen['combo'], 'train': chosen['train'],
+             'validation': chosen['validation'], 'test': (ks, ns),
+             'score': (ks / ns, ns, chosen['validation'][1], -len(chosen['combo']))}]
+
+
+def _ad_run(day_from, day_to, leagues, all_leagues, min_support, min_train_rate, max_filters, max_games):
+    cat, _ = _ah_catalog()
+    hist = _ad_history_frame(results, (len(results), str(results['date'].max()), 'auto-discovery-v2'))
+    if hist.empty:
+        return []
+    targets = {}
+    for nm in cat:
+        if 'zərbə' in nm or 'dəqiq zərbə' in nm:
+            continue
+        if 'künc' in nm:
+            group = 'Künclər'
+        elif '1-ci hissə' in nm:
+            group = '1-ci hissə'
+        else:
+            group = 'Qollar'
+        suffixes = ('E', 'Q') if nm.startswith('Klub ') else ('M',)
+        for side in suffixes:
+            target = f'EVT|{nm}|{side}'
+            if target in hist.columns:
+                targets.setdefault(group, []).append((nm, side, target))
+    # Hər bazar üçün kombinasiya yalnız bir dəfə axtarılır.
+    patterns = {}
+    for group, defs in targets.items():
+        for nm, side, target in defs:
+            pat = _ad_search_target(hist, target, min_support, min_train_rate, max_filters)
+            if pat:
+                patterns[(group, nm, side)] = pat[0]
+    games = _ah_games(day_from, day_to, leagues, all_leagues)
+    if games.empty:
+        return []
+    games = games[games['ft_home'].isna() | games['ft_away'].isna()].head(max_games)
+    if games.empty:
+        return []
+    predictor_names = [n for n in cat if 'zərbə' not in n and 'dəqiq zərbə' not in n]
+    output = []
+    for _, g in games.iterrows():
+        feats = _ad_candidate_features(g, g['_day'], hist, predictor_names)
+        if not feats:
+            continue
+        for (group, nm, side), pat in patterns.items():
+            matched = True
+            for col, op, threshold, *_ in pat['combo']:
+                val = feats.get(col)
+                if val is None or (val < threshold if op == '>=' else val > threshold):
+                    matched = False
+                    break
+            if not matched:
+                continue
+            label = nm
+            if side == 'E':
+                label = 'Ev: ' + nm[5:]
+            elif side == 'Q':
+                label = 'Qonaq: ' + nm[5:]
+            output.append({'date': str(pd.Timestamp(g['_day']).date()),
+                           'time': ('' if pd.isna(g.get('time')) else str(g.get('time', ''))), 'home': str(g['home']),
+                           'away': str(g['away']), 'league': str(g['league']),
+                           'group': group, 'market': label, 'pattern': pat,
+                           'complexity': len(pat['combo'])})
+    output.sort(key=lambda x: (-(x['pattern']['test'][0] / x['pattern']['test'][1]),
+                               -x['pattern']['test'][1], x['complexity']))
+    return output
+
+
+def _ad_ui(day_from, day_to, sel_leagues, all_leagues):
+    st.divider()
+    st.subheader('🧠 Avtomatik filtr kəşfiyyatı')
+    st.caption('Bu bölmə mövcud filtrlərdən ayrıdır. Sistem özü 1–4 şərtli kombinasiyaları axtarır, sonra onları xronoloji ayrılmış validation və test oyunlarında yoxlayır. Yalnız hər iki yoxlamada 100% nəticə verən kombinasiya namizəd kimi göstərilir.')
+    c1, c2, c3, c4 = st.columns(4)
+    min_support = int(c1.number_input('Hər yoxlama hissəsində minimum oyun', 5, 100, 30, step=5, key='ad_support'))
+    min_train_rate = c2.number_input('Təlimdə minimum tutma %', 70, 100, 90, step=5, key='ad_train_rate') / 100
+    max_filters = int(c3.selectbox('Maksimum filtr sayı', [1, 2, 3, 4], index=3, key='ad_max_filters'))
+    max_games = int(c4.number_input('Yoxlanacaq gələcək oyun', 10, 300, 100, step=10, key='ad_max_games'))
+    st.caption('Tarix bölgüsü: 60% öyrənmə · 20% təsdiq · 20% müstəqil test. Filtr kombinasiyalarının daxili adları nəticə cədvəlində göstərilmir.')
+    if st.button('🔬 Avtomatik axtarışı başlat', key='ad_run', type='primary', use_container_width=True):
+        with st.spinner('Tarixi oyunlar hazırlanır, filtr kombinasiyaları yoxlanır...'):
+            try:
+                found = _ad_run(day_from, day_to, sel_leagues, all_leagues,
+                                min_support, min_train_rate, max_filters, max_games)
+                st.session_state['ad_result'] = found
+                st.session_state['ad_key'] = (str(day_from), str(day_to), min_support, min_train_rate, max_filters, max_games,
+                                              len(results), str(results['date'].max()))
+            except Exception as e:
+                st.error(f'Avtomatik axtarış zamanı xəta: {e}')
+                st.session_state.pop('ad_result', None)
+    found = st.session_state.get('ad_result')
+    if found is None:
+        st.info('Axtarışı başlatdıqdan sonra yalnız müstəqil testdən keçən namizədlər burada görünəcək.')
+        return
+    if not found:
+        st.warning('Bu tarix aralığında 100% validation və 100% müstəqil test şərtini ödəyən kombinasiya tapılmadı. Bu halda sistem məsləhət vermir.')
+        return
+    st.success(f'{len(found)} təsdiqlənmiş oyun/bazar namizədi tapıldı.')
+    for item in found:
+        pat = item['pattern']
+        kt, nt = pat['train']; kv, nv = pat['validation']; ks, ns = pat['test']
+        with st.expander(f"{item['date']} · {item['time']} · {item['home']} — {item['away']} | {item['market']} | Test: {ks}/{ns} (100%)"):
+            st.markdown(f"**Bazar:** {item['market']}  \n**Kateqoriya:** {item['group']}")
+            st.markdown(f"**Öyrənmə:** {kt}/{nt} ({kt/nt:.0%})  ·  **Təsdiq:** {kv}/{nv} ({kv/nv:.0%})  ·  **Müstəqil test:** {ks}/{ns} ({ks/ns:.0%})")
+            st.caption(f"Sistem bu nəticəni {item['complexity']} daxili şərtin kombinasiyası ilə tapıb. Daxili şərtlər göstərilmir, amma audit üçün proqram daxilində saxlanılır.")
+    st.warning('Qeyd: 100% yalnız göstərilən tarixi test nümunəsinə aiddir; gələcək oyunun nəticəsinə zəmanət vermir. Kiçik nümunə və çoxsaylı kombinasiya axtarışı təsadüfi uyğunluq yarada bilər.')
+
+
 # Üzən kupon paneli və analiz düyməsi: kupon solda, analiz sağda.
 with st.container(key="coupon_float_button"):
     _coupon_count = len(st.session_state.get("football_coupon", []))
@@ -4189,6 +4469,8 @@ if st.session_state.get('analysis'):
     render_analysis(st.session_state['analysis'], cur_key)
 
 render_always_hit(date_from, date_to, sel_leagues, len(sel_leagues) >= len(league_options), _pct_n)
+
+_ad_ui(date_from, date_to, sel_leagues, len(sel_leagues) >= len(league_options))
 
 with st.expander('Məlumat bazası haqqında'):
     show_info = st.checkbox('Ətraflı məlumatı göstər (yavaş ola bilər)', key='show_info', value=False)
