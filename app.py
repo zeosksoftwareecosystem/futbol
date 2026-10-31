@@ -2254,8 +2254,8 @@ def _ah_group(nm):
 
 
 def _ah_games(d_from, d_to, sel_leagues, all_leagues):
-    """Seçilmiş tarix aralığında hələ oynanılmamış oyunlar (hesabı olmayanlar)."""
-    days = list(pd.date_range(pd.Timestamp(d_from).normalize(), pd.Timestamp(d_to).normalize(), freq='D'))[:_PCT_MAX_DAYS]
+    """Seçilmiş tarix aralığındakı BÜTÜN oyunları gətirir; faiz bölməsinin 7 günlük limiti burada tətbiq edilmir."""
+    days = list(pd.date_range(pd.Timestamp(d_from).normalize(), pd.Timestamp(d_to).normalize(), freq='D'))
     parts = []
     for d in days:
         gd = _pct_games(d, need_stats=False)
@@ -4290,7 +4290,7 @@ def _ad_search_target(frame, target, min_support, min_train_rate, max_filters):
              'score': (ks / ns, ns, chosen['validation'][1], -len(chosen['combo']))}]
 
 
-def _ad_run(day_from, day_to, leagues, all_leagues, min_support, min_train_rate, max_filters, max_games):
+def _ad_run(day_from, day_to, leagues, all_leagues, min_support, min_train_rate, max_filters):
     """Axtarış nəticəsi və diaqnostika qaytarır; hədəf tarixləri ilə təlim tarixçəsini ayırır."""
     cat, _ = _ah_catalog()
     hist = _ad_history_frame(results, (len(results), str(results['date'].max()), 'auto-discovery-v3'))
@@ -4338,9 +4338,12 @@ def _ad_run(day_from, day_to, leagues, all_leagues, min_support, min_train_rate,
     if games.empty:
         diagnostics['reason'] = 'Seçilmiş tarix aralığında qarşıdakı oyun tapılmadı.'
         return {'recommendations': [], 'diagnostics': diagnostics}
-    games = games[games['ft_home'].isna() | games['ft_away'].isna()].head(max_games)
+    # Heç bir süni 100/300 oyun limiti yoxdur: seçilmiş tarix aralığındakı
+    # hesabı hələ məlum olmayan bütün oyunlar analiz edilir.
+    games = games[games['ft_home'].isna() | games['ft_away'].isna()].copy()
     if games.empty:
         diagnostics['reason'] = 'Seçilmiş tarix aralığında hələ başlamamış oyun yoxdur.'
+        diagnostics['candidate_games'] = 0
         return {'recommendations': [], 'diagnostics': diagnostics}
     diagnostics['candidate_games'] = int(len(games))
     predictor_names = [n for n in cat if 'zərbə' not in n and 'dəqiq zərbə' not in n]
@@ -4415,12 +4418,12 @@ def _ad_ui(day_from, day_to, sel_leagues, all_leagues):
     if not _hist_dates.empty:
         st.caption(f'Bütün liqalar üzrə baza: {_hist_dates.min().date()} – {_hist_dates.max().date()}. Yuxarıdakı say və tarixlər seçilmiş liqalara aiddir.')
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3 = st.columns(3)
     min_support = int(c1.number_input('Hər yoxlama hissəsində minimum oyun', 5, 100, 30, step=5, key='ad_support'))
     min_train_rate = c2.number_input('Təlimdə minimum tutma %', 70, 100, 90, step=5, key='ad_train_rate') / 100
     max_filters = int(c3.selectbox('Maksimum filtr sayı', [1, 2, 3, 4], index=3, key='ad_max_filters'))
-    max_games = int(c4.number_input('Yoxlanacaq gələcək oyun', 10, 300, 100, step=10, key='ad_max_games'))
-    st.caption('Tarix bölgüsü: 60% öyrənmə · 20% təsdiq · 20% müstəqil test. Hədəf oyun tarixləri yuxarıdan ayrıca seçilir. Filtrlərin daxili adları gizli saxlanılır.')
+    st.info('Seçilmiş tarix aralığındakı bütün oyunlar yoxlanılacaq. Oyun sayı üçün 100/300 kimi limit yoxdur.')
+    st.caption('Tarix bölgüsü: 60% öyrənmə · 20% təsdiq · 20% müstəqil test. Seçilmiş tarix aralığındakı bütün hələ başlamamış oyunlar analiz edilir; oyun sayı limiti yoxdur. Filtrlərin daxili adları gizli saxlanılır.')
     if st.button('🔬 Avtomatik axtarışı başlat', key='ad_run', type='primary', use_container_width=True):
         if ad_day_from > ad_day_to:
             st.error('Başlanğıc tarixi son tarixdən böyük ola bilməz.')
@@ -4429,9 +4432,9 @@ def _ad_ui(day_from, day_to, sel_leagues, all_leagues):
             with st.spinner('Tarixi oyunlar hazırlanır, filtr kombinasiyaları yoxlanır...'):
                 try:
                     result = _ad_run(ad_day_from, ad_day_to, sel_leagues, all_leagues,
-                                     min_support, min_train_rate, max_filters, max_games)
+                                     min_support, min_train_rate, max_filters)
                     st.session_state['ad_result'] = result
-                    st.session_state['ad_key'] = (str(ad_day_from), str(ad_day_to), min_support, min_train_rate, max_filters, max_games,
+                    st.session_state['ad_key'] = (str(ad_day_from), str(ad_day_to), min_support, min_train_rate, max_filters,
                                                   len(results), str(results['date'].max()))
                 except Exception as e:
                     st.error(f'Avtomatik axtarış zamanı xəta: {e}')
