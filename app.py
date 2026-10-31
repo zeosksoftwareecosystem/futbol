@@ -5162,6 +5162,10 @@ div.st-key-af_panel [data-testid="stNumberInput"] button { background: #1f2937 !
 </style>""", unsafe_allow_html=True)
 
 
+def _af_mark(res):
+    return '✅' if res is True else ('❌' if res is False else '➖')
+
+
 def _af_game_body(g, book_name):
     def f2(v):
         return f'{v:.2f}' if v is not None and pd.notna(v) else '—'
@@ -5175,7 +5179,7 @@ def _af_game_body(g, book_name):
     if c:
         lab = ' + '.join(_ah_pretty(x) for x in g['chosen'])
         od = f" · koef-oxşar keçmiş: {c['odds'][0]}/{c['odds'][1]} ({100 * c['odds'][0] / c['odds'][1]:.0f}%)" if c.get('odds') else ''
-        mark = (' ✅' if c.get('res') else (' ❌' if c.get('res') is False else '')) if g['done'] else ''
+        mark = (' ' + _af_mark(c.get('res'))) if g['done'] else ''
         st.markdown(f"**🎯 Birgə ({len(g['chosen'])} şərt):** {lab}{mark}")
         st.caption(f"Bu şərtlərin hamısı eyni oyunda birlikdə: Ev {c['k_h']}/{c['n_h']} · Qonaq {c['k_a']}/{c['n_a']} ({_af_fmt(c['rate'])}){od}")
     rows = []
@@ -5185,7 +5189,7 @@ def _af_game_body(g, book_name):
             od += f" · bukm. {p['imp']:.0f}%"
         mk = ''
         if g['done']:
-            mk = '✅' if p.get('res') else ('❌' if p.get('res') is False else '·')
+            mk = _af_mark(p.get('res'))
         rows.append({'Şərt': p['label'], 'Ev': p['ev'], 'Qonaq': p['qon'], 'Faiz': _af_fmt(p['rate']),
                      'Liqada': f"{p['base'] * 100:.0f}%", 'Koef-oxşar': od, 'Nəticə': mk})
     cols = ['Şərt', 'Ev', 'Qonaq', 'Faiz', 'Liqada', 'Koef-oxşar'] + (['Nəticə'] if g['done'] else [])
@@ -5321,8 +5325,9 @@ def render_auto_finder(sel_leagues, all_leagues):
             bk_ = FDO_BOOKS[R['P']['book']][0] if R['P'].get('book') in FDO_BOOKS else ''
             for g in fgames[:200]:
                 tm = g['time'] if isinstance(g['time'], str) and g['time'] else '--:--'
-                tags = ' · '.join(f"{lab_of[p['nm']]} {_af_fmt(p['rate'])}" for p in g['picks'])
-                with st.expander(f"{pd.Timestamp(g['day']):%d.%m} {tm} · {g['home']} – {g['away']} · {tags}"):
+                tags = ' · '.join(f"{lab_of[p['nm']]} {_af_fmt(p['rate'])}" + (f" {_af_mark(p.get('res'))}" if g['done'] else '') for p in g['picks'])
+                sc_ = f" ({g['score_txt']})" if g['done'] and g['score_txt'] else ''
+                with st.expander(f"{pd.Timestamp(g['day']):%d.%m} {tm} · {g['home']} – {g['away']}{sc_} · {tags}"):
                     _af_game_body(g, bk_)
             if len(fgames) > 200:
                 st.caption(f'{len(fgames) - 200} oyun daha var: tarix aralığını daralt.')
@@ -5358,7 +5363,11 @@ def render_auto_finder(sel_leagues, all_leagues):
                 tm = g['time'] if isinstance(g['time'], str) and g['time'] else '--:--'
                 nm_c = len(g['chosen'])
                 tail = f" · birgə {nm_c} şərt" if nm_c > 1 else (f" · {g['chosen'][0]}" if nm_c == 1 else f" · {g['picks'][0]['label']}")
-                head = f"{_af_fmt(g['score'])} · {pd.Timestamp(g['day']):%d.%m} {tm} · {g['home']} – {g['away']}{tail}"
+                sc_ = f" ({g['score_txt']})" if g['done'] and g['score_txt'] else ''
+                mk_ = ''
+                if g['done']:
+                    mk_ = ' ' + _af_mark(g['combo'].get('res') if g['combo'] else g['picks'][0].get('res'))
+                head = f"{_af_fmt(g['score'])} · {pd.Timestamp(g['day']):%d.%m} {tm} · {g['home']} – {g['away']}{sc_}{tail}{mk_}"
                 with st.expander(head):
                     _af_game_body(g, book_name)
             if len(grp) > 150:
