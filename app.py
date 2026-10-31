@@ -4470,6 +4470,353 @@ def _ad_ui(day_from, day_to, sel_leagues, all_leagues):
     st.warning('Qeyd: 100% yalnız göstərilən tarixi test nümunəsinə aiddir; gələcək oyunun nəticəsinə zəmanət vermir. Kiçik nümunə və çoxsaylı kombinasiya axtarışı təsadüfi uyğunluq yarada bilər.')
 
 
+# =====================================================================================
+# 💰 KOEFFİSİENTƏ GÖRƏ KEÇMİŞ STATİSTİKA
+# Bugünkü oyunların koeffisientləri (fixtures.csv) və keçmiş oyunların koeffisientləri (mövsüm CSV-ləri)
+# EYNİ mənbədən (football-data.co.uk) və EYNİ bukmekerdən götürülür, ona görə müqayisə düzgündür.
+# Mövcud məlumat bazasına toxunmur: bu bölmə faylları özü oxuyur.
+# =====================================================================================
+FDO_EXTRA_DIR = ROOT / 'football-data-odds-history'   # əlavə köhnə mövsümlər (əsas bazaya qarışmır)
+# Bukmeker: (ad, {slot: [mümkün sütun adları]}). h/d/a = 1/X/2, o/u = Üst/Alt 2.5
+FDO_BOOKS = {
+    'b365': ('Bet365', {'h': ['B365H'], 'd': ['B365D'], 'a': ['B365A'], 'o': ['B365>2.5'], 'u': ['B365<2.5']}),
+    'avg': ('Bazar ortalaması (Avg)', {'h': ['AvgH'], 'd': ['AvgD'], 'a': ['AvgA'], 'o': ['Avg>2.5'], 'u': ['Avg<2.5']}),
+    'max': ('Bazarın ən yüksək koef. (Max)', {'h': ['MaxH'], 'd': ['MaxD'], 'a': ['MaxA'], 'o': ['Max>2.5'], 'u': ['Max<2.5']}),
+    'ps': ('Pinnacle', {'h': ['PSH', 'PH'], 'd': ['PSD', 'PD'], 'a': ['PSA', 'PA'], 'o': ['P>2.5'], 'u': ['P<2.5']}),
+}
+FDO_GOAL_LINES = (1.5, 2.5, 3.5)
+FDO_CORNER_LINES = (8.5, 9.5, 10.5, 11.5)
+FDO_GROUPS = ['1X2', 'Alt/Üst qol', 'İkisi də vurur', 'Künc', 'Cüt şans']
+
+
+def _fdo_files():
+    out = []
+    if FD_DIR.exists():
+        out += [f for f in FD_DIR.glob('*.csv') if f.name != 'fixtures.csv']
+    if FDO_EXTRA_DIR.exists():
+        out += list(FDO_EXTRA_DIR.glob('*.csv'))
+    return sorted(out)
+
+
+def _fdo_sig():
+    """Fayllar dəyişəndə keş avtomatik yenilənsin."""
+    fl = _fdo_files()
+    fx = FD_DIR / 'fixtures.csv'
+    if fx.exists():
+        fl = fl + [fx]
+    sig = []
+    for f in fl:
+        try:
+            s = f.stat()
+            sig.append((str(f), s.st_mtime_ns, s.st_size))
+        except OSError:
+            continue
+    return tuple(sig)
+
+
+def _fdo_read(path):
+    df = read_csv_safe(path)
+    if df is None or df.empty or not {'HomeTeam', 'AwayTeam', 'Date'} <= set(df.columns):
+        return None
+    out = pd.DataFrame({
+        'div': df['Div'].astype(str) if 'Div' in df.columns else 'FD',
+        'date': parse_fd_date(df['Date']),
+        'time': df['Time'].astype(str) if 'Time' in df.columns else '',
+        'home': df['HomeTeam'].astype(str).str.strip(),
+        'away': df['AwayTeam'].astype(str).str.strip(),
+    })
+    for src, dst in (('FTHG', 'hg'), ('FTAG', 'ag'), ('HC', 'hc'), ('AC', 'ac')):
+        out[dst] = pd.to_numeric(df[src], errors='coerce') if src in df.columns else np.nan
+    for key, (_nm, slots) in FDO_BOOKS.items():
+        for slot, cands in slots.items():
+            col = next((c for c in cands if c in df.columns), None)
+            out[f'{key}_{slot}'] = pd.to_numeric(df[col], errors='coerce') if col else np.nan
+    return out.dropna(subset=['date']).loc[lambda x: (x['home'] != '') & (x['home'] != 'nan')]
+
+
+@st.cache_data(show_spinner=False)
+def _fdo_load(sig):
+    """Qaytarır (keçmiş oyunlar, bugün/gələcək oyunlar). Hər ikisində eyni koeffisient sütunları var."""
+    hist, fix = [], None
+    for f in _fdo_files():
+        d = _fdo_read(f)
+        if d is not None:
+            hist.append(d)
+    fx = FD_DIR / 'fixtures.csv'
+    if fx.exists():
+        fix = _fdo_read(fx)
+    hist = pd.concat(hist, ignore_index=True) if hist else pd.DataFrame()
+    if not hist.empty:
+        hist = hist.dropna(subset=['hg', 'ag'])
+        hist = hist.drop_duplicates(subset=['div', 'date', 'home', 'away']).reset_index(drop=True)
+    if fix is None:
+        fix = pd.DataFrame()
+    elif not fix.empty:
+        fix = fix.copy()
+        fix['time'] = fix['time'].where(fix['time'].str.fullmatch(r'\d{1,2}:\d{2}'), np.nan)
+        fix = to_baku(fix, 'Europe/London')          # football-data saatı Britaniya saatıdır → Bakı saatı
+        fix['date'] = pd.to_datetime(fix['date'], errors='coerce').dt.normalize()
+        fix = fix.dropna(subset=['date']).reset_index(drop=True)
+    return hist, fix
+
+
+def _fdo_hist_markets(H):
+    """Bütün keçmiş oyunlar üçün bazarlar: ad → (qrup, hit-massivi, etibarlı-massiv). Bir dəfə hesablanır."""
+    hg, ag = H['hg'].to_numpy(float), H['ag'].to_numpy(float)
+    tg = hg + ag
+    ok = np.ones(len(H), bool)
+    M = {}
+    M['1'] = ('1X2', hg > ag, ok)
+    M['X'] = ('1X2', hg == ag, ok)
+    M['2'] = ('1X2', hg < ag, ok)
+    M['1X'] = ('Cüt şans', hg >= ag, ok)
+    M['X2'] = ('Cüt şans', hg <= ag, ok)
+    M['12'] = ('Cüt şans', hg != ag, ok)
+    for ln in FDO_GOAL_LINES:
+        M[f'Üst {ln}'] = ('Alt/Üst qol', tg > ln, ok)
+        M[f'Alt {ln}'] = ('Alt/Üst qol', tg < ln, ok)
+    btts = (hg > 0) & (ag > 0)
+    M['İkisi də vurur: Bəli'] = ('İkisi də vurur', btts, ok)
+    M['İkisi də vurur: Xeyr'] = ('İkisi də vurur', ~btts, ok)
+    hc, ac = H['hc'].to_numpy(float), H['ac'].to_numpy(float)
+    cok = ~(np.isnan(hc) | np.isnan(ac))
+    tc = hc + ac
+    for ln in FDO_CORNER_LINES:
+        M[f'Künc üst {ln}'] = ('Künc', tc > ln, cok)
+        M[f'Künc alt {ln}'] = ('Künc', tc < ln, cok)
+    return M
+
+
+def _fdo_implied(label, g):
+    """Bukmekerin marjasız ehtimalı (%) və ya None. g: oyunun h/d/a/o/u koeffisientləri."""
+    def ok(*ks):
+        return all(pd.notna(g.get(k)) and g.get(k) > 1 for k in ks)
+    if label in ('1', 'X', '2') and ok('h', 'd', 'a'):
+        tot = 1 / g['h'] + 1 / g['d'] + 1 / g['a']
+        return 100 * (1 / g[{'1': 'h', 'X': 'd', '2': 'a'}[label]]) / tot
+    if label in ('Üst 2.5', 'Alt 2.5') and ok('o', 'u'):
+        tot = 1 / g['o'] + 1 / g['u']
+        return 100 * (1 / g['o' if label == 'Üst 2.5' else 'u']) / tot
+    return None
+
+
+def _fdo_neighbors(cols, g, ladder, min_n, same_div, div_arr):
+    """Oxşar koeffisientli keçmiş oyunlar. Tolerans tədricən genişlənir ki, minimum oyun sayı yığılsın."""
+    fields = [k for k in ('h', 'a', 'o') if pd.notna(g.get(k)) and g.get(k) > 1]
+    if not fields:
+        return None, 0.0
+    used = ladder[0]
+    mask = None
+    for tol in ladder:
+        used = tol
+        mask = np.ones(len(div_arr), bool)
+        if same_div:
+            mask &= (div_arr == g['div'])
+        for k in fields:
+            mask &= np.abs(cols[k] / g[k] - 1) <= tol
+        if mask.sum() >= min_n:
+            break
+    return mask, used
+
+
+def _fdo_compute(hist, fix, day, book, tol0, tol_max, min_n, same_div, groups, leagues):
+    cols = {s: hist[f'{book}_{s}'].to_numpy(float) for s in 'hdaou'}
+    div_arr = hist['div'].to_numpy(str)
+    M = _fdo_hist_markets(hist)
+    ladder = [tol0]
+    while ladder[-1] < tol_max - 1e-9:
+        ladder.append(min(round(ladder[-1] * 1.2, 4), tol_max))
+    day_ts = pd.Timestamp(day).normalize()
+    todays = fix[fix['date'] == day_ts]
+    if leagues:
+        todays = todays[todays['div'].isin(leagues)]
+    out, skipped = [], []
+    for _, r in todays.iterrows():
+        g = {s: r.get(f'{book}_{s}') for s in 'hdaou'}
+        g['div'] = r['div']
+        name = f"{r['home']} — {r['away']}"
+        mask, used = _fdo_neighbors(cols, g, ladder, min_n, same_div, div_arr)
+        if mask is None:
+            skipped.append(f'{name} (bu bukmekerdə koeffisient yoxdur)')
+            continue
+        n_match = int(mask.sum())
+        if n_match == 0:
+            skipped.append(f'{name} (oxşar koeffisientli keçmiş oyun tapılmadı)')
+            continue
+        rows = []
+        for label, (grp, hit, valid) in M.items():
+            if grp not in groups:
+                continue
+            sel = mask & valid
+            n = int(sel.sum())
+            if n == 0:
+                continue
+            k = int((hit & sel).sum())
+            imp = _fdo_implied(label, g)
+            rows.append({'group': grp, 'label': label, 'k': k, 'n': n, 'pct': 100 * k / n, 'imp': imp,
+                         'edge': (100 * k / n - imp) if imp is not None else None})
+        out.append({'date': r['date'], 'time': r.get('time'), 'div': r['div'], 'league': FD_LEAGUES.get(r['div'], r['div']),
+                    'home': r['home'], 'away': r['away'], 'odds': {s: g[s] for s in 'hdaou'},
+                    'n_match': n_match, 'tol': used, 'rows': rows})
+    return out, skipped
+
+
+def _fdo_best(item, min_n_rank, by_edge):
+    c = [x for x in item['rows'] if x['n'] >= min_n_rank and (x['edge'] is not None if by_edge else True)]
+    if not c:
+        return None
+    return max(c, key=(lambda x: (x['edge'], x['n'])) if by_edge else (lambda x: (x['pct'], x['n'])))
+
+
+def _fdo_download_history(extra=5):
+    """Əlavə köhnə mövsümləri ayrıca qovluğa yükləyir (daha çox keçmiş oyun = daha etibarlı faiz)."""
+    FDO_EXTRA_DIR.mkdir(exist_ok=True)
+    now = datetime.now()
+    y = now.year if now.month >= 7 else now.year - 1
+    seasons = [f'{(y - k) % 100:02d}{(y - k + 1) % 100:02d}' for k in range(2, 2 + extra)]
+    jobs = [(s, c) for s in seasons for c in FD_LEAGUES]
+    got = 0
+
+    def one(job):
+        s, c = job
+        p = FDO_EXTRA_DIR / f'{s}_{c}.csv'
+        if p.exists() and p.stat().st_size > 200:
+            return True
+        try:
+            r = requests.get(f'{FD_BASE}/mmz4281/{s}/{c}.csv', timeout=20, headers={'User-Agent': 'FutbolFiltri/1.0'})
+            if r.status_code == 200 and len(r.content) > 200:
+                p.write_bytes(r.content)
+                return True
+        except requests.RequestException:
+            pass
+        return False
+
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        for ok_ in ex.map(one, jobs):
+            got += int(ok_)
+    _fdo_load.clear()
+    return got, len(jobs)
+
+
+def _fdo_pct_color(p):
+    return '#1b9e4b' if p >= 80 else ('#5aa02c' if p >= 65 else ('#c98a00' if p >= 50 else '#888'))
+
+
+def _fdo_game_table(item, min_n_rank):
+    import html as _h
+    rows = sorted(item['rows'], key=lambda x: (-x['pct'], -x['n']))
+    css = ('<style>.foW{overflow-x:auto}.foT{width:100%;border-collapse:collapse;font-size:12.5px}'
+           '.foT th,.foT td{border:1px solid rgba(128,128,128,.35);padding:4px 7px;text-align:left;white-space:nowrap}'
+           '.foT th{background:rgba(128,128,128,.15)}.foB{display:inline-block;height:8px;border-radius:4px;vertical-align:middle;margin-right:6px}'
+           '.foL{opacity:.5}</style>')
+    body = ''
+    for x in rows:
+        low = x['n'] < min_n_rank
+        imp = f"{x['imp']:.0f}%" if x['imp'] is not None else '—'
+        edge = f"{x['edge']:+.0f}" if x['edge'] is not None else '—'
+        bar = f"<span class='foB' style='width:{max(2, x['pct'] * 0.8):.0f}px;background:{_fdo_pct_color(x['pct'])}'></span>"
+        body += (f"<tr class='{'foL' if low else ''}'><td>{_h.escape(x['label'])}</td><td>{bar}<b>{x['pct']:.0f}%</b></td>"
+                 f"<td>{x['k']} / {x['n']}{' ⚠️ az' if low else ''}</td><td>{imp}</td><td>{edge}</td></tr>")
+    return (css + '<div class="foW"><table class="foT"><thead><tr><th>Bazar</th><th>Keçmişdə gəlib</th><th>Oyun</th>'
+            '<th>Bukmeker ehtimalı</th><th>Fərq</th></tr></thead><tbody>' + body + '</tbody></table></div>')
+
+
+def render_odds_stats():
+    st.divider()
+    st.subheader('💰 Koeffisientə görə keçmiş statistika')
+    st.caption('Bugünkü oyunların koeffisientləri və keçmiş oyunların koeffisientləri eyni mənbədən (football-data.co.uk) və eyni bukmekerdən götürülür. '
+               'Hər oyun üçün keçmişdə oxşar koeffisientlə (1, 2 və Üst 2.5) oynanmış oyunlar tapılır və onlarda nəticələrin neçə faiz gəldiyi göstərilir. '
+               'Siyahı ən yüksək faizdən aşağıya düzülür; oyunun üstünə basanda bütün bazarların nəticəsi açılır.')
+    hist, fix = _fdo_load(_fdo_sig())
+    if fix.empty:
+        st.info('Bugünkü oyunların koeffisientləri hələ yüklənməyib. Yuxarıdakı "Məlumatı yenilə" düyməsinə bas (fixtures.csv football-data.co.uk-dan gəlir).')
+        return
+    if hist.empty:
+        st.info('Keçmiş oyunların koeffisientləri hələ yüklənməyib. "Məlumatı yenilə" düyməsinə bas.')
+        return
+    books = [k for k, (_n, sl) in FDO_BOOKS.items()
+             if fix[f'{k}_h'].notna().any() and fix[f'{k}_a'].notna().any() and hist[f'{k}_h'].notna().any()]
+    if not books:
+        st.warning('fixtures.csv faylında tanınan bukmeker koeffisienti tapılmadı.')
+        return
+
+    with st.container(border=True):
+        c1, c2 = st.columns([1, 1])
+        st.session_state.setdefault('fo_day', baku_today())
+        day = c1.date_input('Oyun günü', key='fo_day')
+        book = c2.selectbox('Bukmeker (bugünkü və keçmiş eyni olacaq)', books, format_func=lambda k: FDO_BOOKS[k][0], key='fo_book')
+        c3, c4, c5 = st.columns(3)
+        min_n = int(c3.number_input('Minimum oyun sayı', 10, 500, 30, step=10, key='fo_min_n',
+                                    help='Oxşar koeffisientli keçmiş oyun bu qədərdən azdırsa, tolerans avtomatik genişlənir. Faizli bazarlar da ən azı bu qədər oyunda yoxlanmış olmalıdır.'))
+        tol0 = c4.slider('Başlanğıc tolerans (±%)', 3, 20, 8, key='fo_tol0',
+                         help='Koeffisient məsələn 2.00-dırsa və tolerans 8%-dirsə, 1.84-2.16 arası koeffisientli oyunlar oxşar sayılır.') / 100
+        tol_max = c5.slider('Maksimum tolerans (±%)', 10, 40, 25, key='fo_tolmax') / 100
+        c6, c7 = st.columns(2)
+        groups = c6.multiselect('Hansı bazarlar sıralamaya düşsün', FDO_GROUPS, default=FDO_GROUPS[:4], key='fo_groups')
+        sort_mode = c7.radio('Sıralama', ['Ən yüksək faiz', 'Faiz − bukmeker ehtimalı (üstünlük)'], key='fo_sort', horizontal=True,
+                             help='Üstünlük rejimi yalnız koeffisienti olan bazarlara baxır: 1, X, 2, Üst/Alt 2.5.')
+        with st.expander('Əlavə ayarlar'):
+            e1, e2 = st.columns(2)
+            min_pct = e1.number_input('Siyahıda göstərmək üçün minimum faiz', 0, 100, 0, step=5, key='fo_min_pct')
+            same_div = e2.checkbox('Yalnız eyni liqanın keçmiş oyunlarına bax', value=False, key='fo_same_div',
+                                   help='Söndürülü olanda bütün liqalardan oxşar koeffisientli oyunlar götürülür (daha çox nümunə).')
+            div_opts = sorted(fix['div'].dropna().unique())
+            leagues = st.multiselect('Yalnız bu liqalar (boş = hamısı)', div_opts, format_func=lambda d: FD_LEAGUES.get(d, d), key='fo_leagues')
+            hd = hist['date']
+            st.caption(f'Keçmiş baza: {len(hist):,} oyun, {hd.min().date()} – {hd.max().date()}.'.replace(',', ' '))
+            n_cn = int(hist[f'{book}_o'].notna().sum())
+            st.caption(f'Üst/Alt 2.5 koeffisienti olan keçmiş oyun: {n_cn:,}. Künc statistikası olan: {int(hist["hc"].notna().sum()):,}.'.replace(',', ' '))
+            if st.button('📥 Daha çox keçmiş mövsüm yüklə (5 mövsüm)', key='fo_dl',
+                         help='Əsas bazaya qarışmır, ayrıca qovluğa yüklənir. Nümunə sayını artırır.'):
+                with st.spinner('Köhnə mövsümlər yüklənir...'):
+                    got, tot = _fdo_download_history(5)
+                st.success(f'{got}/{tot} fayl hazırdır.')
+                st.rerun()
+        go = st.button('📊 Hesabla', type='primary', key='fo_go', use_container_width=True)
+
+    if go:
+        if not groups:
+            st.warning('Ən azı bir bazar qrupu seç.')
+        else:
+            with st.spinner('Oxşar koeffisientli keçmiş oyunlar hesablanır...'):
+                items, skipped = _fdo_compute(hist, fix, day, book, tol0, max(tol_max, tol0), min_n, same_div, set(groups), set(leagues))
+            st.session_state['fo_result'] = {'items': items, 'skipped': skipped, 'day': day, 'book': book,
+                                             'min_n': min_n, 'by_edge': sort_mode != 'Ən yüksək faiz', 'min_pct': float(min_pct)}
+    R = st.session_state.get('fo_result')
+    if not R:
+        return
+    items, by_edge, min_n_r = R['items'], R['by_edge'], R['min_n']
+    ranked = []
+    for it in items:
+        b = _fdo_best(it, min_n_r, by_edge)
+        if b is not None and b['pct'] >= R['min_pct']:
+            ranked.append((it, b))
+    ranked.sort(key=lambda t: ((t[1]['edge'], t[1]['n']) if by_edge else (t[1]['pct'], t[1]['n'])), reverse=True)
+    st.markdown(f"**{R['day']} · {FDO_BOOKS[R['book']][0]}** — {len(items)} oyun hesablandı, {len(ranked)} oyun siyahıdadır.")
+    if R['skipped']:
+        with st.expander(f'Hesablanmayan oyunlar ({len(R["skipped"])})'):
+            st.write('\n'.join(f'- {s}' for s in R['skipped']))
+    if not ranked:
+        st.warning('Bu gün üçün şərtlərə uyğun oyun tapılmadı. Başqa gün seç, minimum oyun sayını azalt və ya tolerans həddini artır.')
+        return
+    for i, (it, b) in enumerate(ranked, 1):
+        tm = it['time'] if isinstance(it['time'], str) and it['time'] else '--:--'
+        o = it['odds']
+        head = (f"{i}. {tm} · {it['home']} — {it['away']}  |  ⭐ {b['label']}: {b['pct']:.0f}% ({b['k']}/{b['n']})"
+                + (f"  ·  üstünlük {b['edge']:+.0f}" if by_edge and b['edge'] is not None else ''))
+        with st.expander(head):
+            def f(v):
+                return f'{v:.2f}' if pd.notna(v) else '—'
+            st.markdown(f"**{it['league']}** · koeffisient: **1** {f(o['h'])} · **X** {f(o['d'])} · **2** {f(o['a'])} · "
+                        f"**Üst 2.5** {f(o['o'])} · **Alt 2.5** {f(o['u'])}")
+            st.caption(f"Oxşar koeffisientli keçmiş oyun: {it['n_match']} (tolerans ±{it['tol'] * 100:.0f}%). "
+                       f"Aşağıdakı hər faiz bu {it['n_match']} oyunda faktiki nəticədir. Künc üçün yalnız künc statistikası olan oyunlar sayılır. "
+                       f"\"Fərq\" = keçmiş faiz − bukmekerin marjasız ehtimalı (yalnız 1/X/2 və 2.5 üçün).")
+            st.markdown(_fdo_game_table(it, min_n_r), unsafe_allow_html=True)
+    st.warning('Qeyd: bu, keçmişdə oxşar koeffisientlə nə baş verdiyinin statistikasıdır, gələcək nəticəyə zəmanət deyil. '
+               'Koeffisient aşağı olan bazarın (məs. Üst 1.5) faizi yüksək çıxması normaldır, çünki bukmeker onu artıq qiymətə qatıb. Real maraqlı olan faiz bukmeker ehtimalından yüksək olan hallardır (Fərq sütunu).')
+
+
 # Üzən kupon paneli və analiz düyməsi: kupon solda, analiz sağda.
 with st.container(key="coupon_float_button"):
     _coupon_count = len(st.session_state.get("football_coupon", []))
@@ -4547,6 +4894,8 @@ if st.session_state.get('analysis'):
     render_analysis(st.session_state['analysis'], cur_key)
 
 render_always_hit(date_from, date_to, sel_leagues, len(sel_leagues) >= len(league_options), _pct_n)
+
+render_odds_stats()
 
 _ad_ui(date_from, date_to, sel_leagues, len(sel_leagues) >= len(league_options))
 
