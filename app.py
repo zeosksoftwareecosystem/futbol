@@ -6302,6 +6302,107 @@ def _ss_scan_fragment():
             )
 
 
+# =====================================================================================
+# 📡 CANLI xG CƏDVƏLİ
+# Hazırda gedən BÜTÜN oyunlar: hər komandanın anlıq xG-si ayrıca və cəmi. Mənbə mövcud canlı skanerlə eynidir
+# (_ss_scan_live: əvvəl SofaScore, alınmasa ESPN). Mənbə xG verməyən oyunlarda real xG göstərilmir:
+# istəsən həmin oyunlar üçün zərbələrdən hesablanmış TƏXMİNİ xG ayrıca (və aydın işarələnmiş) göstərilir.
+# =====================================================================================
+@st.cache_data(ttl=20, show_spinner=False)
+def _xgx_scan(nonce):
+    """Bütün istifadəçilər üçün 20 san keşlənir (mənbələri lazımsız yükləməmək üçün). nonce = "İndi yenilə" düyməsi."""
+    return _ss_scan_live()
+
+
+def _xgx_num(v):
+    try:
+        f = float(v)
+        return f if np.isfinite(f) else np.nan
+    except (TypeError, ValueError):
+        return np.nan
+
+
+def _xgx_estimate(shots, target):
+    """Zərbələrdən kobud xG: qapıya dəqiq zərbə ≈ 0.32, digər zərbə ≈ 0.04. Dəqiq zərbə yoxdursa zərbə başına ≈ 0.10."""
+    if pd.notna(target) and pd.notna(shots):
+        return 0.32 * target + 0.04 * max(shots - target, 0.0)
+    if pd.notna(shots):
+        return 0.10 * shots
+    return np.nan
+
+
+def _xgx_tables(rows, with_estimate):
+    real, est, none = [], [], []
+    for r in rows:
+        hs, as_ = r.get('home_score'), r.get('away_score')
+        base = {'Dəq': str(r.get('minute') or r.get('status') or ''), 'Liqa': str(r.get('league') or ''),
+                'Ev': str(r.get('home') or ''), 'Hesab': f"{hs if hs is not None else 0}–{as_ if as_ is not None else 0}",
+                'Qonaq': str(r.get('away') or ''), 'Mənbə': str(r.get('source') or '')}
+        xh, xa = _xgx_num(r.get('xg_home')), _xgx_num(r.get('xg_away'))
+        if pd.notna(xh) and pd.notna(xa):
+            real.append({**base, 'xG Ev': xh, 'xG Qonaq': xa, 'xG Cəmi': xh + xa})
+            continue
+        eh = _xgx_estimate(_xgx_num(r.get('shots_home')), _xgx_num(r.get('target_home')))
+        ea = _xgx_estimate(_xgx_num(r.get('shots_away')), _xgx_num(r.get('target_away')))
+        if with_estimate and pd.notna(eh) and pd.notna(ea):
+            est.append({**base, '~xG Ev': eh, '~xG Qonaq': ea, '~xG Cəmi': eh + ea})
+        else:
+            none.append(f"{base['Ev']} – {base['Qonaq']}")
+    real.sort(key=lambda x: -x['xG Cəmi'])
+    est.sort(key=lambda x: -x['~xG Cəmi'])
+    return real, est, none
+
+
+def _xgx_fragment():
+    with st.container(border=True, key='live_xg_table'):
+        c1, c2 = st.columns([1, 2])
+        if c1.button('🔄 İndi yenilə', key='xgx_refresh', use_container_width=True):
+            st.session_state['xgx_nonce'] = st.session_state.get('xgx_nonce', 0) + 1
+        with_est = c2.checkbox('xG verilməyən oyunlar üçün təxmini xG də göstər', value=True, key='xgx_est',
+                               help='Mənbə bəzi oyunlarda xG vermir. Belə oyunlarda zərbə və qapıya dəqiq zərbə sayından kobud təxmin hesablanır. Bu real xG deyil.')
+        with st.spinner('Canlı oyunlar və xG yüklənir...'):
+            rows, err, _stat_err = _xgx_scan(st.session_state.get('xgx_nonce', 0))
+        if err:
+            st.error(f'Canlı məlumat alınmadı: {err}')
+            st.caption('Bir qədər sonra yenidən yoxla. Mənbə avtomatik sorğuları müvəqqəti məhdudlaşdıra bilər.')
+            return
+        if not rows:
+            st.info('Hazırda mənbələrdə canlı gedən oyun tapılmadı.')
+            return
+        real, est, none = _xgx_tables(rows, with_est)
+        srcs = ', '.join(sorted({str(r.get('source') or 'naməlum') for r in rows}))
+        st.caption(f"Canlı oyun: **{len(rows)}** · real xG olan: **{len(real)}** · təxmini: {len(est)} · statistikası yoxdur: {len(none)} · "
+                   f"Mənbə: {srcs} · Son yoxlama: {pd.Timestamp.now(tz='Asia/Baku').strftime('%H:%M:%S')} (Bakı)")
+        cfg = {'xG Ev': st.column_config.NumberColumn('xG Ev', format='%.2f'),
+               'xG Qonaq': st.column_config.NumberColumn('xG Qonaq', format='%.2f'),
+               'xG Cəmi': st.column_config.NumberColumn('xG Cəmi', format='%.2f'),
+               '~xG Ev': st.column_config.NumberColumn('~xG Ev', format='%.2f'),
+               '~xG Qonaq': st.column_config.NumberColumn('~xG Qonaq', format='%.2f'),
+               '~xG Cəmi': st.column_config.NumberColumn('~xG Cəmi', format='%.2f')}
+        if real:
+            st.markdown('**Real xG (mənbədən)** · xG cəminə görə düzülüb')
+            d = pd.DataFrame(real)[['Dəq', 'Liqa', 'Ev', 'Hesab', 'Qonaq', 'xG Ev', 'xG Qonaq', 'xG Cəmi', 'Mənbə']]
+            st.dataframe(d, hide_index=True, use_container_width=True, column_config=cfg, height=min(38 * (len(d) + 1) + 3, 620))
+        else:
+            st.warning('Hazırda heç bir canlı oyun üçün mənbə real xG vermir.')
+        if est:
+            st.markdown('**Təxmini xG** (mənbə xG vermir; zərbələrdən kobud hesablanıb, real xG deyil)')
+            d2 = pd.DataFrame(est)[['Dəq', 'Liqa', 'Ev', 'Hesab', 'Qonaq', '~xG Ev', '~xG Qonaq', '~xG Cəmi', 'Mənbə']]
+            st.dataframe(d2, hide_index=True, use_container_width=True, column_config=cfg, height=min(38 * (len(d2) + 1) + 3, 620))
+        if none:
+            with st.expander(f'Statistikası olmayan oyunlar ({len(none)})'):
+                st.write('\n'.join(f'- {x}' for x in none))
+
+
+st.markdown('## 📡 Canlı xG cədvəli')
+st.caption('Hazırda gedən bütün oyunların anlıq xG-si: hər iki komanda ayrıca və cəmi. Hesab və dəqiqə də yanında göstərilir.')
+_xgx_iv = st.selectbox('Avtomatik yenilənmə', ['30 san', '60 san', '120 san', 'Söndür'], index=1, key='xgx_iv')
+if hasattr(st, 'fragment') and _xgx_iv != 'Söndür':
+    st.fragment(run_every=f"{_xgx_iv.split()[0]}s")(_xgx_fragment)()
+else:
+    _xgx_fragment()
+
+
 if hasattr(st, "fragment"):
     st.fragment(run_every="60s")(_ss_scan_fragment)()
 else:
