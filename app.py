@@ -6304,13 +6304,18 @@ def _ss_scan_fragment():
 
 # =====================================================================================
 # 📡 CANLI xG CƏDVƏLİ
-# Hazırda gedən BÜTÜN oyunlar: hər komandanın anlıq xG-si ayrıca və cəmi. Mənbə mövcud canlı skanerlə eynidir
-# (_ss_scan_live: əvvəl SofaScore, alınmasa ESPN). Mənbə xG verməyən oyunlarda real xG göstərilmir:
-# istəsən həmin oyunlar üçün zərbələrdən hesablanmış TƏXMİNİ xG ayrıca (və aydın işarələnmiş) göstərilir.
+# Hazırda gedən BÜTÜN oyunlar: hər komandanın anlıq xG-si ayrıca və cəmi.
+# Mənbə 1: API-Football (Secrets-dəki APIFOOTBALL_KEY). Streamlit Cloud-da SofaScore adətən 403 verir, bu mənbə isə işləyir.
+#          Pulsuz planın gündəlik limitinə görə YALNIZ düymə ilə yüklənir və proqramın mövcud sorğu sayğacını paylaşır.
+# Mənbə 2: SofaScore → ESPN (mövcud canlı skaner), avtomatik yenilənir.
+# Mənbə xG vermirsə, real xG göstərilmir; istəsən həmin oyunlar üçün zərbələrdən TƏXMİNİ xG ayrıca göstərilir.
 # =====================================================================================
+import time as _xgx_time
+
+
 @st.cache_data(ttl=20, show_spinner=False)
 def _xgx_scan(nonce):
-    """Bütün istifadəçilər üçün 20 san keşlənir (mənbələri lazımsız yükləməmək üçün). nonce = "İndi yenilə" düyməsi."""
+    """SofaScore/ESPN: 20 san keşlənir. nonce = "İndi yenilə" düyməsi."""
     return _ss_scan_live()
 
 
@@ -6331,6 +6336,72 @@ def _xgx_estimate(shots, target):
     return np.nan
 
 
+def _xgx_quota():
+    u = (_apif_load() or {}).get('used') or {}
+    n = int(u.get('n', 0)) if u.get('day') == baku_today().isoformat() else 0
+    return n, APIF_DAILY_CAP
+
+
+def _xgx_apif_xg(resp, home_id):
+    """API-Football statistikasından xG (type = expected_goals). Yoxdursa NaN."""
+    out = {'xg_home': np.nan, 'xg_away': np.nan}
+    for t in resp or []:
+        side = 'xg_home' if (t.get('team') or {}).get('id') == home_id else 'xg_away'
+        for it in t.get('statistics') or []:
+            if str(it.get('type', '')).lower().replace(' ', '_') == 'expected_goals':
+                out[side] = _xgx_num(it.get('value'))
+    return out
+
+
+def _xgx_apif_live(max_games):
+    """API-Football: 1 sorğu ilə bütün canlı oyunlar + ən çox max_games oyun üçün statistika (hər biri 1 sorğu)."""
+    resp, err = _apif_get('fixtures', {'live': 'all', 'timezone': 'Asia/Baku'})
+    if err:
+        return [], err
+    rows = []
+    for it in resp:
+        try:
+            fx, tm, gl, lg = it['fixture'], it['teams'], it.get('goals') or {}, it.get('league') or {}
+            st_ = fx.get('status') or {}
+            short = st_.get('short', '')
+            if short not in _APIF_LIVE:
+                continue
+            el = st_.get('elapsed')
+            rows.append({'id': str(fx['id']), 'home_id': tm['home']['id'], 'home': tm['home']['name'], 'away': tm['away']['name'],
+                         'league': f"{lg.get('country', '')} · {lg.get('name', '')}".strip(' ·'),
+                         'minute': 'Fasilə' if short == 'HT' else (f"{el}'" if el is not None else short),
+                         'elapsed': el or 0, 'home_score': gl.get('home'), 'away_score': gl.get('away'),
+                         'source': 'API-Football', 'xg_home': np.nan, 'xg_away': np.nan})
+        except (KeyError, TypeError):
+            continue
+    rows.sort(key=lambda r: -r['elapsed'])           # daha çox oynanmış oyunlarda xG daha mənalıdır
+    pick = rows[:max(0, int(max_games))]
+
+    def one(r):
+        sresp, serr = _apif_get('fixtures/statistics', {'fixture': r['id']})
+        if serr:
+            return r['id'], None, serr
+        return r['id'], sresp, None
+
+    errs = []
+    if pick:
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            got = {fid: (sresp, serr) for fid, sresp, serr in pool.map(one, pick)}
+        for r in pick:
+            sresp, serr = got.get(r['id'], (None, 'cavab yoxdur'))
+            if serr:
+                errs.append(serr)
+                continue
+            r.update(_xgx_apif_xg(sresp, r['home_id']))
+            for k, v in _apif_stats_parse(sresp, r['home_id']).items():       # home_shots/home_target/home_corners ...
+                side, what = k.split('_', 1)
+                r[f'{what}_{side}'] = v
+    note = None
+    if errs:
+        note = f"{len(errs)} oyunun statistikası yüklənmədi: {errs[0]}"
+    return rows, note
+
+
 def _xgx_tables(rows, with_estimate):
     real, est, none = [], [], []
     for r in rows:
@@ -6347,60 +6418,98 @@ def _xgx_tables(rows, with_estimate):
         if with_estimate and pd.notna(eh) and pd.notna(ea):
             est.append({**base, '~xG Ev': eh, '~xG Qonaq': ea, '~xG Cəmi': eh + ea})
         else:
-            none.append(f"{base['Ev']} – {base['Qonaq']}")
+            none.append(f"{base['Ev']} {base['Hesab']} {base['Qonaq']} · {base['Dəq']}")
     real.sort(key=lambda x: -x['xG Cəmi'])
     est.sort(key=lambda x: -x['~xG Cəmi'])
     return real, est, none
 
 
-def _xgx_fragment():
+def _xgx_render(rows, note, when_txt):
+    with_est = st.session_state.get('xgx_est', True)
+    real, est, none = _xgx_tables(rows, with_est)
+    srcs = ', '.join(sorted({str(r.get('source') or 'naməlum') for r in rows}))
+    st.caption(f"Canlı oyun: **{len(rows)}** · real xG olan: **{len(real)}** · təxmini: {len(est)} · xG/statistikası yoxdur: {len(none)} · "
+               f"Mənbə: {srcs} · {when_txt}")
+    if note:
+        st.caption(f'⚠️ {note}')
+    cfg = {c: st.column_config.NumberColumn(c, format='%.2f') for c in
+           ('xG Ev', 'xG Qonaq', 'xG Cəmi', '~xG Ev', '~xG Qonaq', '~xG Cəmi')}
+    if real:
+        st.markdown('**Real xG (mənbədən)** · xG cəminə görə düzülüb')
+        d = pd.DataFrame(real)[['Dəq', 'Liqa', 'Ev', 'Hesab', 'Qonaq', 'xG Ev', 'xG Qonaq', 'xG Cəmi', 'Mənbə']]
+        st.dataframe(d, hide_index=True, use_container_width=True, column_config=cfg, height=min(38 * (len(d) + 1) + 3, 620))
+    else:
+        st.warning('Bu yükləmədə heç bir canlı oyun üçün mənbə real xG vermədi.')
+    if est:
+        st.markdown('**Təxmini xG** (mənbə xG vermir; zərbələrdən kobud hesablanıb, real xG deyil)')
+        d2 = pd.DataFrame(est)[['Dəq', 'Liqa', 'Ev', 'Hesab', 'Qonaq', '~xG Ev', '~xG Qonaq', '~xG Cəmi', 'Mənbə']]
+        st.dataframe(d2, hide_index=True, use_container_width=True, column_config=cfg, height=min(38 * (len(d2) + 1) + 3, 620))
+    if none:
+        with st.expander(f'xG və ya zərbə statistikası olmayan oyunlar ({len(none)})'):
+            st.write('\n'.join(f'- {x}' for x in none))
+
+
+def _xgx_fragment(mode, max_games=10):
     with st.container(border=True, key='live_xg_table'):
         c1, c2 = st.columns([1, 2])
-        if c1.button('🔄 İndi yenilə', key='xgx_refresh', use_container_width=True):
-            st.session_state['xgx_nonce'] = st.session_state.get('xgx_nonce', 0) + 1
         with_est = c2.checkbox('xG verilməyən oyunlar üçün təxmini xG də göstər', value=True, key='xgx_est',
                                help='Mənbə bəzi oyunlarda xG vermir. Belə oyunlarda zərbə və qapıya dəqiq zərbə sayından kobud təxmin hesablanır. Bu real xG deyil.')
+        if mode == 'api':
+            used, cap = _xgx_quota()
+            go = c1.button('📥 Yüklə / yenilə', key='xgx_api_go', use_container_width=True, type='primary',
+                           help=f'1 sorğu canlı siyahı üçün + ən çox {max_games} oyun üçün 1-er sorğu.')
+            st.caption(f'API-Football bu gün: {used}/{cap} sorğu istifadə olunub (proqramın digər hissələri ilə ortaq sayğac). '
+                       f'Bir yükləmə ≈ {1 + max_games} sorğu.')
+            last = st.session_state.get('xgx_api')
+            if go:
+                if last and _xgx_time.time() - last['ts'] < 15:
+                    st.info('Bir neçə saniyə əvvəl yüklənib, bir az gözlə.')
+                else:
+                    with st.spinner('API-Football-dan canlı oyunlar və xG yüklənir...'):
+                        rows, note = _xgx_apif_live(max_games)
+                    last = {'rows': rows, 'note': note, 'ts': _xgx_time.time()}
+                    st.session_state['xgx_api'] = last
+            if not last:
+                st.info('Canlı xG-ni görmək üçün "Yüklə / yenilə" düyməsinə bas. Limit qorunsun deyə avtomatik yüklənmir.')
+                return
+            if not last['rows']:
+                if last['note']:
+                    st.error(f"API-Football məlumatı alınmadı: {last['note']}")
+                else:
+                    st.info('API-Football-a görə hazırda canlı gedən oyun yoxdur.')
+                return
+            when = f"Yüklənib: {pd.Timestamp.fromtimestamp(last['ts'], tz='Asia/Baku').strftime('%H:%M:%S')} (Bakı)"
+            _xgx_render(last['rows'], last['note'], when)
+            return
+        if c1.button('🔄 İndi yenilə', key='xgx_refresh', use_container_width=True):
+            st.session_state['xgx_nonce'] = st.session_state.get('xgx_nonce', 0) + 1
         with st.spinner('Canlı oyunlar və xG yüklənir...'):
             rows, err, _stat_err = _xgx_scan(st.session_state.get('xgx_nonce', 0))
         if err:
             st.error(f'Canlı məlumat alınmadı: {err}')
-            st.caption('Bir qədər sonra yenidən yoxla. Mənbə avtomatik sorğuları müvəqqəti məhdudlaşdıra bilər.')
+            st.caption('Streamlit Cloud serverlərini SofaScore adətən bloklayır (HTTP 403). Belə olanda yuxarıdan "API-Football" mənbəsini seç.')
             return
         if not rows:
-            st.info('Hazırda mənbələrdə canlı gedən oyun tapılmadı.')
+            st.info('Hazırda SofaScore/ESPN-də canlı gedən oyun tapılmadı.')
             return
-        real, est, none = _xgx_tables(rows, with_est)
-        srcs = ', '.join(sorted({str(r.get('source') or 'naməlum') for r in rows}))
-        st.caption(f"Canlı oyun: **{len(rows)}** · real xG olan: **{len(real)}** · təxmini: {len(est)} · statistikası yoxdur: {len(none)} · "
-                   f"Mənbə: {srcs} · Son yoxlama: {pd.Timestamp.now(tz='Asia/Baku').strftime('%H:%M:%S')} (Bakı)")
-        cfg = {'xG Ev': st.column_config.NumberColumn('xG Ev', format='%.2f'),
-               'xG Qonaq': st.column_config.NumberColumn('xG Qonaq', format='%.2f'),
-               'xG Cəmi': st.column_config.NumberColumn('xG Cəmi', format='%.2f'),
-               '~xG Ev': st.column_config.NumberColumn('~xG Ev', format='%.2f'),
-               '~xG Qonaq': st.column_config.NumberColumn('~xG Qonaq', format='%.2f'),
-               '~xG Cəmi': st.column_config.NumberColumn('~xG Cəmi', format='%.2f')}
-        if real:
-            st.markdown('**Real xG (mənbədən)** · xG cəminə görə düzülüb')
-            d = pd.DataFrame(real)[['Dəq', 'Liqa', 'Ev', 'Hesab', 'Qonaq', 'xG Ev', 'xG Qonaq', 'xG Cəmi', 'Mənbə']]
-            st.dataframe(d, hide_index=True, use_container_width=True, column_config=cfg, height=min(38 * (len(d) + 1) + 3, 620))
-        else:
-            st.warning('Hazırda heç bir canlı oyun üçün mənbə real xG vermir.')
-        if est:
-            st.markdown('**Təxmini xG** (mənbə xG vermir; zərbələrdən kobud hesablanıb, real xG deyil)')
-            d2 = pd.DataFrame(est)[['Dəq', 'Liqa', 'Ev', 'Hesab', 'Qonaq', '~xG Ev', '~xG Qonaq', '~xG Cəmi', 'Mənbə']]
-            st.dataframe(d2, hide_index=True, use_container_width=True, column_config=cfg, height=min(38 * (len(d2) + 1) + 3, 620))
-        if none:
-            with st.expander(f'Statistikası olmayan oyunlar ({len(none)})'):
-                st.write('\n'.join(f'- {x}' for x in none))
+        _xgx_render(rows, None, f"Son yoxlama: {pd.Timestamp.now(tz='Asia/Baku').strftime('%H:%M:%S')} (Bakı)")
 
 
 st.markdown('## 📡 Canlı xG cədvəli')
 st.caption('Hazırda gedən bütün oyunların anlıq xG-si: hər iki komanda ayrıca və cəmi. Hesab və dəqiqə də yanında göstərilir.')
-_xgx_iv = st.selectbox('Avtomatik yenilənmə', ['30 san', '60 san', '120 san', 'Söndür'], index=1, key='xgx_iv')
-if hasattr(st, 'fragment') and _xgx_iv != 'Söndür':
-    st.fragment(run_every=f"{_xgx_iv.split()[0]}s")(_xgx_fragment)()
+_xgx_opts = (['API-Football (açar ilə)'] if _apif_key() else []) + ['SofaScore / ESPN']
+_xgx_src = st.selectbox('Mənbə', _xgx_opts, key='xgx_src',
+                        help='API-Football Streamlit Cloud-da işləyir, amma pulsuz planda gündə 100 sorğu limiti var. SofaScore bu serverlərdə çox vaxt bloklanır.')
+if _xgx_src.startswith('API-Football'):
+    _xgx_max = int(st.number_input('Neçə oyun üçün xG yüklənsin (hər oyun 1 sorğu)', 1, 40, 10, key='xgx_max',
+                                   help='Canlı siyahı həmişə tam gəlir (1 sorğu). Statistikası yüklənən oyunlar ən çox oynanmışlardan başlayır.'))
+    _xgx_fragment('api', _xgx_max)
 else:
-    _xgx_fragment()
+    _xgx_iv = st.selectbox('Avtomatik yenilənmə', ['30 san', '60 san', '120 san', 'Söndür'], index=1, key='xgx_iv')
+    if hasattr(st, 'fragment') and _xgx_iv != 'Söndür':
+        st.fragment(run_every=f"{_xgx_iv.split()[0]}s")(_xgx_fragment)('espn')
+    else:
+        _xgx_fragment('espn')
 
 
 if hasattr(st, "fragment"):
