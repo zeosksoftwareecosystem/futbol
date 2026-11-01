@@ -6495,6 +6495,64 @@ def _xgx_fragment(mode, max_games=10):
         _xgx_render(rows, None, f"Son yoxlama: {pd.Timestamp.now(tz='Asia/Baku').strftime('%H:%M:%S')} (Bakı)")
 
 
+# ---------------- 🔬 Mənbə testi: hansı canlı xG mənbəsi BU serverdən (Streamlit Cloud) əlçatandır ----------------
+_XGX_PROBES = [
+    ('SofaScore: canlı siyahı', 'https://api.sofascore.com/api/v1/sport/football/events/live', None),
+    ('FotMob: günün oyunları', 'https://www.fotmob.com/api/data/matches?date={d}&timezone=Asia%2FBaku&ccode3=AZE', None),
+    ('FotMob: günün oyunları (köhnə ünvan)', 'https://www.fotmob.com/api/matches?date={d}', None),
+    ('365Scores: canlı oyunlar', 'https://webws.365scores.com/web/games/current/?appTypeId=5&langId=1&timezoneName=Asia/Baku&userCountryId=1&sports=1', None),
+    ('ESPN: Premier League scoreboard', 'https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard', None),
+    ('API-Football: hesab statusu (limitdən saymır)', 'https://v3.football.api-sports.io/status', 'apif'),
+]
+
+
+def _xgx_probe_one(item):
+    name, url, kind = item
+    import re as _re
+    url = url.replace('{d}', pd.Timestamp.now(tz='Asia/Baku').strftime('%Y%m%d'))
+    hdr = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+           'Accept': 'application/json, text/plain, */*'}
+    if kind == 'apif':
+        if not _apif_key():
+            return {'Mənbə': name, 'Nəticə': '❌ açar yoxdur', 'HTTP': '—', 'Ölçü': '—', 'xG sözü': '—', 'Qeyd': ''}
+        hdr['x-apisports-key'] = _apif_key()
+    try:
+        r = requests.get(url, headers=hdr, timeout=12)
+    except requests.RequestException as e:
+        return {'Mənbə': name, 'Nəticə': f'❌ {type(e).__name__}', 'HTTP': '—', 'Ölçü': '—', 'xG sözü': '—', 'Qeyd': str(e)[:80]}
+    body = r.text or ''
+    has_xg = bool(_re.search(r'expected[_ ]?goals|"xg"|xgot|"xg_', body, _re.I))
+    note, api_err = '', False
+    if kind == 'apif':
+        try:
+            j = r.json()
+            errs = j.get('errors')
+            resp = j.get('response') or {}
+            sub = (resp.get('subscription') or {}) if isinstance(resp, dict) else {}
+            req = (resp.get('requests') or {}) if isinstance(resp, dict) else {}
+            api_err = bool(errs)
+            note = (str(errs)[:120] if errs else f"plan={sub.get('plan')}, aktiv={sub.get('active')}, sorğu={req.get('current')}/{req.get('limit_day')}")
+        except ValueError:
+            note = 'JSON deyil'
+    ok = r.status_code == 200 and len(body) > 200 and not api_err
+    return {'Mənbə': name, 'Nəticə': '✅ cavab verir' if ok else ('❌ hesab/açar xətası' if api_err else '❌ bloklanıb/xətalı'), 'HTTP': str(r.status_code),
+            'Ölçü': f'{len(body):,}'.replace(',', ' '), 'xG sözü': 'var' if has_xg else 'yoxdur (siyahı cavabında olmaya bilər)', 'Qeyd': note}
+
+
+def _xgx_probe_ui():
+    with st.expander('🔬 Mənbə testi (hansı sayt bu serverdən işləyir?)'):
+        st.caption('Hər mənbəyə bir sorğu göndərir və cavab kodunu göstərir. API-Football statusu gündəlik limitdən sayılmır. '
+                   '"✅ cavab verir" saytın bu serverdən açıldığı deməkdir; xG-nin real oyun üçün gəlib-gəlmədiyi ayrıca yoxlanılmalıdır.')
+        if st.button('▶ Testi işə sal', key='xgx_probe_go'):
+            with st.spinner('Mənbələr yoxlanılır...'):
+                with ThreadPoolExecutor(max_workers=6) as pool:
+                    res = list(pool.map(_xgx_probe_one, _XGX_PROBES))
+            st.session_state['xgx_probe'] = res
+        res = st.session_state.get('xgx_probe')
+        if res:
+            st.dataframe(pd.DataFrame(res), hide_index=True, use_container_width=True)
+
+
 st.markdown('## 📡 Canlı xG cədvəli')
 st.caption('Hazırda gedən bütün oyunların anlıq xG-si: hər iki komanda ayrıca və cəmi. Hesab və dəqiqə də yanında göstərilir.')
 _xgx_opts = (['API-Football (açar ilə)'] if _apif_key() else []) + ['SofaScore / ESPN']
@@ -6510,6 +6568,7 @@ else:
         st.fragment(run_every=f"{_xgx_iv.split()[0]}s")(_xgx_fragment)('espn')
     else:
         _xgx_fragment('espn')
+_xgx_probe_ui()
 
 
 if hasattr(st, "fragment"):
