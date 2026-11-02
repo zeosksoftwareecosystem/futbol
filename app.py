@@ -1703,17 +1703,66 @@ def _oh_add_manual():
     if not od:
         ss['oh_m_msg'] = ('warning', 'Ən azı bir koeffisient yaz (1-dən böyük).')
         return
-    ss.setdefault('oh_manual', []).append({'div': ss['oh_m_lg'], 'date': pd.Timestamp(ss['oh_m_date']).strftime('%Y-%m-%d'),
-                                           'time': ss.get('oh_m_time', ''), 'home': h, 'away': a, 'odds': od})
-    for k in ('oh_m_home', 'oh_m_away'):
-        ss[k] = ''
+    item = {'div': ss['oh_m_lg'], 'date': pd.Timestamp(ss['oh_m_date']).strftime('%Y-%m-%d'),
+            'time': ss.get('oh_m_time', ''), 'home': h, 'away': a, 'odds': od}
+    L = ss.setdefault('oh_manual', [])
+    e = ss.get('oh_m_edit')
+    if e is not None and 0 <= e < len(L):
+        L[e] = item
+        ss['oh_m_msg'] = ('success', f'Yadda saxlanıldı: {h} — {a}')
+    else:
+        L.append(item)
+        ss['oh_m_msg'] = ('success', f'Əlavə olundu: {h} — {a}')
+    ss['oh_m_edit'] = None
+    ss['oh_sel'] = None
+    _oh_reset_form()
+
+
+def _oh_reset_form():
+    ss = st.session_state
+    ss['oh_m_home'] = ss['oh_m_away'] = ss['oh_m_time'] = ''
     for s, _ in OH_SLOTS:
         ss[f'oh_m_{s}'] = 0.0
-    ss['oh_m_msg'] = ('success', f'Əlavə olundu: {h} — {a}')
+
+
+def _oh_edit_manual(i):
+    ss = st.session_state
+    L = ss.get('oh_manual', [])
+    if not (0 <= i < len(L)):
+        return
+    m = L[i]
+    ss['oh_m_edit'] = i
+    ss['oh_m_lg'], ss['oh_m_date'] = m['div'], pd.Timestamp(m['date']).date()
+    ss['oh_m_time'], ss['oh_m_home'], ss['oh_m_away'] = m['time'], m['home'], m['away']
+    for s, _ in OH_SLOTS:
+        ss[f'oh_m_{s}'] = float(m['odds'].get(s, 0.0))
+    ss['oh_sel'] = None
+
+
+def _oh_edit_by_key(key):
+    for i, m in enumerate(st.session_state.get('oh_manual', [])):
+        if (m['div'], m['date'], m['home'], m['away']) == tuple(key):
+            _oh_edit_manual(i)
+            return
+
+
+def _oh_delete_manual(i):
+    L = st.session_state.get('oh_manual', [])
+    if 0 <= i < len(L):
+        L.pop(i)
+    st.session_state['oh_m_edit'] = None
+    st.session_state['oh_sel'] = None
+
+
+def _oh_cancel_edit():
+    st.session_state['oh_m_edit'] = None
+    _oh_reset_form()
 
 
 def _oh_clear_manual():
     st.session_state['oh_manual'] = []
+    st.session_state['oh_m_edit'] = None
+    st.session_state['oh_sel'] = None
 
 
 def _oh_similar(hist, g, book, slots, tol, same_div, years):
@@ -1799,6 +1848,64 @@ def _oh_fill_scores(G):
             G.at[i, 'hth'], G.at[i, 'hta'] = R.at[j, 'ht_home'], R.at[j, 'ht_away']
         G.at[i, 'played'] = True
     return G
+
+
+def _oh_toggle_scan(day):
+    st.session_state['oh_scan'] = None if st.session_state.get('oh_scan') == day else day
+
+
+def _oh_scan(grp, hist, book, use, tol, same_div, years, thr, minn):
+    """Günün hər oyunu üçün: oxşar koeffisientli keçmiş oyunlarda tutma faizi >= thr olan nəticələri tapır."""
+    rows, skipped = [], 0
+    for _, r in grp.iterrows():
+        g = {s: r.get(f'{book}_{s}') for s in 'hdaou'}
+        g.update({'div': r['div'], 'date': r['date']})
+        have = [s for s in use if pd.notna(g.get(s)) and g[s] > 1]
+        if not have:
+            skipped += 1
+            continue
+        M = _oh_similar(hist, g, book, have, tol, same_div and r['div'] in FD_LEAGUES, years)
+        if M.empty:
+            skipped += 1
+            continue
+        fin = pd.notna(r.get('hg')) and pd.notna(r.get('ag'))
+        actual = {lbl: (bool(h[0]), bool(o[0])) for lbl, h, o in _oh_markets(pd.DataFrame([r]))} if fin else {}
+        for lbl, hit, ok in _oh_markets(M):
+            n = int(ok.sum())
+            if n < minn:
+                continue
+            k = int((hit & ok).sum())
+            if 100 * k / n + 1e-9 < thr:
+                continue
+            real = ''
+            if lbl in actual and actual[lbl][1]:
+                real = '✅' if actual[lbl][0] else '❌'
+            rows.append({'Oyun': f"{r['home']} — {r['away']}", 'Liqa': _oh_lg(r['div']), 'Nəticə': lbl,
+                         'Faiz': round(100 * k / n, 1), 'Keçmişdə': f'{k}/{n}',
+                         'Bukmeker': _fdo_implied(lbl, g) if lbl in ('1', 'X', '2', 'Üst 2.5', 'Alt 2.5') else None,
+                         'Real': real, '_n': n})
+    return rows, skipped
+
+
+def _oh_scan_show(grp, hist, book, use, tol, same_div, years, thr, minn):
+    with st.container(border=True):
+        with st.spinner('Günün oyunları yoxlanılır...'):
+            rows, skipped = _oh_scan(grp, hist, book, use, tol, same_div, years, thr, minn)
+        st.markdown(f'**Keçmişdə {thr:g}%+ gələnlər** (ən azı {minn} oxşar oyun, son {years} il, tolerans ±{tol * 100:.1f}%)')
+        if not rows:
+            st.info('Bu şərtlərə uyğun nəticə tapılmadı. Faizi və ya minimum oyun sayını azalt, ya da toleransı artır.')
+        else:
+            D = pd.DataFrame(rows).sort_values(['Faiz', '_n'], ascending=False).drop(columns='_n')
+            D['Bukmeker'] = D['Bukmeker'].map(lambda v: f'{v:.0f}%' if pd.notna(v) else '—')
+            st.dataframe(D, hide_index=True, use_container_width=True,
+                         column_config={'Faiz': st.column_config.NumberColumn('Faiz', format='%.1f%%')})
+            real = D['Real'].value_counts()
+            if real.sum():
+                st.caption(f"Bitmiş oyunlarda real yoxlama: ✅ {int(real.get('✅', 0))} gəlib, ❌ {int(real.get('❌', 0))} gəlməyib. "
+                           'Oyuna basıb ətraflı baxa bilərsiniz.')
+        if skipped:
+            st.caption(f'Koeffisienti olmayan və ya oxşar keçmiş oyunu tapılmayan oyun: {skipped}.')
+        st.caption('Bu, keçmiş statistikadır, gələcək nəticəyə zəmanət deyil. Kiçik nümunədə 100% təsadüfi ola bilər.')
 
 
 def _oh_fmt(v):
@@ -1937,6 +2044,11 @@ def render_odds_match_page():
                                 help='Koef. 2.00, tolerans 4% olsa, 1.92–2.08 arası koeffisientli oyunlar eyni sayılır.') / 100
         years = int(o[2].number_input('Son neçə il', 1, 25, 5, key='oh_years'))
         same_div = o[3].checkbox('Yalnız eyni liqa', value=False, key='oh_same_div')
+        o2 = st.columns(4)
+        thr = float(o2[0].number_input('Günün oyunları üçün min. faiz', 1.0, 100.0, 100.0, 1.0, format='%.0f', key='oh_thr',
+                                       help='Siyahıdakı "🎯" düyməsi: keçmişdə oxşar koeffisientli oyunlarda bu faiz və ya daha çox gələn nəticələri tapır.'))
+        minn = int(o2[1].number_input('Min. oxşar oyun sayı', 1, 500, 5, key='oh_minn',
+                                      help='Bundan az oxşar oyun olan nəticələr nəzərə alınmır (kiçik nümunədə 100% təsadüfi olur).'))
         need = pd.Timestamp(baku_today()) - pd.DateOffset(years=years)
         have = hist['date'].min()
         st.caption(f'Bazada keçmiş oyun: {len(hist):,}'.replace(',', ' ') + f' · ən köhnə tarix: {have:%d.%m.%Y}')
@@ -1965,7 +2077,7 @@ def render_odds_match_page():
         st.warning('Başlanğıc tarixi son tarixdən böyük ola bilməz.')
         return
 
-    with st.expander('➕ Oyun əlavə et (Çempionlar Liqası, Avropa/Konfrans Liqası və s.)'):
+    with st.expander('➕ Oyun əlavə et (Çempionlar Liqası, Avropa/Konfrans Liqası və s.)', expanded=st.session_state.get('oh_m_edit') is not None):
         st.caption('Bu yarışların koeffisienti bazada yoxdur. Seçdiyin bukmekerdən koeffisientləri özün yaz; 0 = yoxdur. Analiz daxili liqaların keçmiş oyunları ilə aparılır.')
         for k, v in (('oh_m_home', ''), ('oh_m_away', ''), ('oh_m_time', ''), ('oh_m_lg', 'UCL')):
             st.session_state.setdefault(k, v)
@@ -1982,15 +2094,24 @@ def render_odds_match_page():
         m3 = st.columns(5)
         for i, (s, nm) in enumerate(OH_SLOTS):
             m3[i].number_input(nm, 0.0, 1000.0, step=0.01, format='%.2f', key=f'oh_m_{s}')
-        b1 = st.columns([1, 1, 3])
-        b1[0].button('Əlavə et', on_click=_oh_add_manual, key='oh_m_add', use_container_width=True)
-        if st.session_state.get('oh_manual'):
+        _ed = st.session_state.get('oh_m_edit') is not None
+        if _ed:
+            st.info('✏️ Redaktə rejimi: dəyişikliyi edib "Yadda saxla"ya bas.')
+        b1 = st.columns([1, 1, 1, 2])
+        b1[0].button('Yadda saxla' if _ed else 'Əlavə et', on_click=_oh_add_manual, key='oh_m_add', use_container_width=True, type='primary' if _ed else 'secondary')
+        if _ed:
+            b1[1].button('Ləğv et', on_click=_oh_cancel_edit, key='oh_m_cancel', use_container_width=True)
+        elif st.session_state.get('oh_manual'):
             b1[1].button('Hamısını sil', on_click=_oh_clear_manual, key='oh_m_clear', use_container_width=True)
         msg = st.session_state.pop('oh_m_msg', None)
         if msg:
             getattr(st, msg[0])(msg[1])
-        if st.session_state.get('oh_manual'):
-            st.caption('Əlavə etdiklərin: ' + '; '.join(f"{m['date']} {m['home']}—{m['away']}" for m in st.session_state['oh_manual']))
+        for i, m in enumerate(st.session_state.get('oh_manual', [])):
+            r1 = st.columns([5, 1, 1])
+            od = ' · '.join(f"{nm} {m['odds'][s]:.2f}" for s, nm in OH_SLOTS if s in m['odds'])
+            r1[0].caption(f"{m['date']} · {m['home']} — {m['away']} · {od}")
+            r1[1].button('✏️', on_click=_oh_edit_manual, args=(i,), key=f'oh_m_e{i}', help='Redaktə et', use_container_width=True)
+            r1[2].button('🗑', on_click=_oh_delete_manual, args=(i,), key=f'oh_m_d{i}', help='Sil', use_container_width=True)
     _man = _oh_manual_df()
     if not _man.empty:
         fix = pd.concat([fix, _man], ignore_index=True) if fix is not None and not fix.empty else _man
@@ -2019,7 +2140,14 @@ def render_odds_match_page():
         st.warning(f'{len(G)} oyun var, ilk 300-ü göstərilir. Tarix aralığını daralt.')
         G = G.head(300)
     for day, grp in G.groupby('date'):
-        st.markdown(f'**{day:%d.%m.%Y}** · {len(grp)} oyun')
+        _dk = f'{day:%Y-%m-%d}'
+        _hh = st.columns([5, 2])
+        _hh[0].markdown(f'**{day:%d.%m.%Y}** · {len(grp)} oyun')
+        _on = st.session_state.get('oh_scan') == _dk
+        _hh[1].button('✖ Bağla' if _on else f'🎯 {thr:g}% olanları tap', key='ohs_' + _dk, on_click=_oh_toggle_scan, args=(_dk,),
+                      use_container_width=True, type='primary' if _on else 'secondary')
+        if _on:
+            _oh_scan_show(grp, hist, book, use, tol, same_div, years, thr, minn)
         for _, r in grp.iterrows():
             c = st.columns([1.0, 2, 3.2, 2.6, 1.3])
             if pd.notna(r['hg']) and pd.notna(r['ag']):
@@ -2032,7 +2160,12 @@ def render_odds_match_page():
             c[2].write(f"{r['home']} — {r['away']}")
             c[3].caption(' · '.join(f"{nm} {_oh_fmt(r.get(f'{book}_{s}'))}" for s, nm in OH_SLOTS))
             key = (r['div'], pd.Timestamp(r['date']).strftime('%Y-%m-%d'), r['home'], r['away'])
-            c[4].button('🔍 Analiz', key='ohp_' + '|'.join(key), on_click=_oh_pick, args=(key,), use_container_width=True)
+            if r['div'] in OH_EXTRA_LG:
+                sub = c[4].columns([3, 1])
+                sub[0].button('🔍 Analiz', key='ohp_' + '|'.join(key), on_click=_oh_pick, args=(key,), use_container_width=True)
+                sub[1].button('✏️', key='ohe_' + '|'.join(key), on_click=_oh_edit_by_key, args=(key,), use_container_width=True, help='Koeffisientləri redaktə et')
+            else:
+                c[4].button('🔍 Analiz', key='ohp_' + '|'.join(key), on_click=_oh_pick, args=(key,), use_container_width=True)
 
 
 
