@@ -2013,7 +2013,7 @@ def render_odds_match_page():
         st.info('Bu tarix aralığında oyun tapılmadı. (Qarşıdakı oyunlar üçün "Məlumatı yenilə" düyməsinə bas.)')
         return
     lgs = sorted(G['div'].map(lambda x: _oh_lg(x)).unique())
-    pick = st.multiselect('Liqalar', lgs, default=lgs, key='oh_lgs')
+    pick = st.multiselect('Liqalar', lgs, default=lgs)   # key yoxdur: yeni əlavə olunan yarış avtomatik seçilsin
     G = G[G['div'].map(lambda x: _oh_lg(x)).isin(pick)]
     if len(G) > 300:
         st.warning(f'{len(G)} oyun var, ilk 300-ü göstərilir. Tarix aralığını daralt.')
