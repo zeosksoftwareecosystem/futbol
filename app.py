@@ -1671,6 +1671,51 @@ def _fdo_pct_color(p):
     return '#1b9e4b' if p >= 80 else ('#5aa02c' if p >= 65 else ('#c98a00' if p >= 50 else '#888'))
 
 
+OH_EXTRA_LG = {'UCL': 'UEFA Çempionlar Liqası', 'UEL': 'UEFA Avropa Liqası', 'UECL': 'UEFA Konfrans Liqası', 'OTH': 'Digər (əl ilə)'}
+
+
+def _oh_lg(code):
+    return FD_LEAGUES.get(code) or OH_EXTRA_LG.get(code, code)
+
+
+def _oh_manual_df():
+    L = st.session_state.get('oh_manual', [])
+    if not L:
+        return pd.DataFrame()
+    rows = []
+    for m in L:
+        r = {'div': m['div'], 'date': pd.Timestamp(m['date']), 'time': m['time'], 'home': m['home'], 'away': m['away']}
+        for k in FDO_BOOKS:
+            for s in 'hdaou':
+                r[f'{k}_{s}'] = m['odds'].get(s, np.nan)
+        rows.append(r)
+    return pd.DataFrame(rows)
+
+
+def _oh_add_manual():
+    ss = st.session_state
+    h, a = ss.get('oh_m_home', '').strip(), ss.get('oh_m_away', '').strip()
+    if not h or not a:
+        ss['oh_m_msg'] = ('warning', 'Komanda adlarını yaz.')
+        return
+    od = {s: float(ss.get(f'oh_m_{s}', 0) or 0) for s, _ in OH_SLOTS}
+    od = {s: v for s, v in od.items() if v > 1}
+    if not od:
+        ss['oh_m_msg'] = ('warning', 'Ən azı bir koeffisient yaz (1-dən böyük).')
+        return
+    ss.setdefault('oh_manual', []).append({'div': ss['oh_m_lg'], 'date': pd.Timestamp(ss['oh_m_date']).strftime('%Y-%m-%d'),
+                                           'time': ss.get('oh_m_time', ''), 'home': h, 'away': a, 'odds': od})
+    for k in ('oh_m_home', 'oh_m_away'):
+        ss[k] = ''
+    for s, _ in OH_SLOTS:
+        ss[f'oh_m_{s}'] = 0.0
+    ss['oh_m_msg'] = ('success', f'Əlavə olundu: {h} — {a}')
+
+
+def _oh_clear_manual():
+    st.session_state['oh_manual'] = []
+
+
 def _oh_similar(hist, g, book, slots, tol, same_div, years):
     day = pd.Timestamp(g['date']).normalize()
     mask = ((hist['date'] < day) & (hist['date'] >= day - pd.DateOffset(years=int(years)))).to_numpy().copy()
@@ -1716,6 +1761,43 @@ def _oh_games(hist, fix, d_from, d_to):
     G = pd.concat(parts, ignore_index=True).drop_duplicates(subset=['div', 'date', 'home', 'away'], keep='first')
     tm = G['time'].astype(str).where(G['time'].astype(str).str.fullmatch(r'\d{1,2}:\d{2}'), '99:99')
     G = G.assign(_t=tm).sort_values(['date', '_t', 'div', 'home']).reset_index(drop=True)
+    return G
+
+
+def _oh_fill_scores(G):
+    """Bitmiş, lakin fixtures.csv-də hesabı olmayan oyunların hesabını əsas nəticə bazasından (bütün mənbələr) tapır."""
+    if G.empty:
+        return G
+    need = G['hg'].isna() & (G['date'] <= pd.Timestamp(baku_today()))
+    if not need.any():
+        return G
+    try:
+        _f, R, _o = load_data()
+    except Exception:
+        return G
+    if R is None or R.empty or 'home_k' not in R.columns:
+        return G
+    d0, d1 = G.loc[need, 'date'].min() - pd.Timedelta(days=1), G.loc[need, 'date'].max() + pd.Timedelta(days=1)
+    R = R[(R['date'] >= d0) & (R['date'] <= d1)]
+    if R.empty:
+        return G
+    G = G.copy()
+    exact = {}
+    for i, rr in zip(R.index, R[['home_k', 'away_k']].itertuples(index=False)):
+        exact.setdefault((rr[0], rr[1]), []).append(i)
+    for i in G.index[need]:
+        hk, ak = team_key(G.at[i, 'home']), team_key(G.at[i, 'away'])
+        cand = exact.get((hk, ak), [])
+        if not cand:
+            cand = [j for (h2, a2), js in exact.items() if names_compatible(hk, h2) and names_compatible(ak, a2) for j in js]
+        cand = [j for j in cand if abs((R.at[j, 'date'] - G.at[i, 'date']).days) <= 1]
+        if not cand:
+            continue
+        j = min(cand, key=lambda x: abs((R.at[x, 'date'] - G.at[i, 'date']).days))
+        G.at[i, 'hg'], G.at[i, 'ag'] = R.at[j, 'ft_home'], R.at[j, 'ft_away']
+        if 'ht_home' in R.columns:
+            G.at[i, 'hth'], G.at[i, 'hta'] = R.at[j, 'ht_home'], R.at[j, 'ht_away']
+        G.at[i, 'played'] = True
     return G
 
 
@@ -1766,7 +1848,7 @@ def _oh_summary_html(rows):
 def _oh_analysis(hist, r, book, slots, tol, same_div, years):
     g = {s: r.get(f'{book}_{s}') for s in 'hdaou'}
     g.update({'div': r['div'], 'date': r['date']})
-    lg = FD_LEAGUES.get(r['div'], r['div'])
+    lg = _oh_lg(r['div'])
     st.button('← Oyunların siyahısına qayıt', on_click=_oh_close, key='oh_back')
     st.subheader(f"{r['home']} — {r['away']}")
     st.caption(f"{lg} · {pd.Timestamp(r['date']):%d.%m.%Y}")
@@ -1817,7 +1899,7 @@ def _oh_analysis(hist, r, book, slots, tol, same_div, years):
     X = M.sort_values('date', ascending=False)
     out = pd.DataFrame({
         'Tarix': X['date'].dt.strftime('%d.%m.%Y'),
-        'Liqa': X['div'].map(lambda d: FD_LEAGUES.get(d, d)),
+        'Liqa': X['div'].map(lambda d: _oh_lg(d)),
         'Ev sahibi': X['home'], 'Qonaq': X['away'],
         **{names[s]: X[f'{book}_{s}'].round(2) for s in use},
         'Hesab': [f'{int(a)}:{int(b)}' for a, b in zip(X['hg'], X['ag'])],
@@ -1883,7 +1965,38 @@ def render_odds_match_page():
         st.warning('Başlanğıc tarixi son tarixdən böyük ola bilməz.')
         return
 
+    with st.expander('➕ Oyun əlavə et (Çempionlar Liqası, Avropa/Konfrans Liqası və s.)'):
+        st.caption('Bu yarışların koeffisienti bazada yoxdur. Seçdiyin bukmekerdən koeffisientləri özün yaz; 0 = yoxdur. Analiz daxili liqaların keçmiş oyunları ilə aparılır.')
+        for k, v in (('oh_m_home', ''), ('oh_m_away', ''), ('oh_m_time', ''), ('oh_m_lg', 'UCL')):
+            st.session_state.setdefault(k, v)
+        for s, _ in OH_SLOTS:
+            st.session_state.setdefault(f'oh_m_{s}', 0.0)
+        st.session_state.setdefault('oh_m_date', st.session_state['oh_from'])
+        m1 = st.columns([2, 1.4, 1])
+        m1[0].selectbox('Yarış', list(OH_EXTRA_LG), format_func=lambda k: OH_EXTRA_LG[k], key='oh_m_lg')
+        m1[1].date_input('Tarix', key='oh_m_date')
+        m1[2].text_input('Saat (ixtiyari)', key='oh_m_time', placeholder='22:00')
+        m2 = st.columns(2)
+        m2[0].text_input('Ev sahibi', key='oh_m_home')
+        m2[1].text_input('Qonaq', key='oh_m_away')
+        m3 = st.columns(5)
+        for i, (s, nm) in enumerate(OH_SLOTS):
+            m3[i].number_input(nm, 0.0, 1000.0, step=0.01, format='%.2f', key=f'oh_m_{s}')
+        b1 = st.columns([1, 1, 3])
+        b1[0].button('Əlavə et', on_click=_oh_add_manual, key='oh_m_add', use_container_width=True)
+        if st.session_state.get('oh_manual'):
+            b1[1].button('Hamısını sil', on_click=_oh_clear_manual, key='oh_m_clear', use_container_width=True)
+        msg = st.session_state.pop('oh_m_msg', None)
+        if msg:
+            getattr(st, msg[0])(msg[1])
+        if st.session_state.get('oh_manual'):
+            st.caption('Əlavə etdiklərin: ' + '; '.join(f"{m['date']} {m['home']}—{m['away']}" for m in st.session_state['oh_manual']))
+    _man = _oh_manual_df()
+    if not _man.empty:
+        fix = pd.concat([fix, _man], ignore_index=True) if fix is not None and not fix.empty else _man
+
     G = _oh_games(hist, fix, d_from, d_to)
+    G = _oh_fill_scores(G)
     if fix is not None and not fix.empty:
         st.caption(f"Koeffisienti olan qarşıdakı oyunlar (fixtures.csv): cəmi {len(fix)}, tarixlər {fix['date'].min():%d.%m.%Y} – {fix['date'].max():%d.%m.%Y}. "
                    f"Seçilmiş aralıqda: {len(G)} oyun. Yalnız football-data.co.uk-un əsas liqaları var; qitə kubokları və digər liqaların koeffisienti bu mənbədə yoxdur.")
@@ -1899,21 +2012,24 @@ def render_odds_match_page():
     if G.empty:
         st.info('Bu tarix aralığında oyun tapılmadı. (Qarşıdakı oyunlar üçün "Məlumatı yenilə" düyməsinə bas.)')
         return
-    lgs = sorted(G['div'].map(lambda x: FD_LEAGUES.get(x, x)).unique())
+    lgs = sorted(G['div'].map(lambda x: _oh_lg(x)).unique())
     pick = st.multiselect('Liqalar', lgs, default=lgs, key='oh_lgs')
-    G = G[G['div'].map(lambda x: FD_LEAGUES.get(x, x)).isin(pick)]
+    G = G[G['div'].map(lambda x: _oh_lg(x)).isin(pick)]
     if len(G) > 300:
         st.warning(f'{len(G)} oyun var, ilk 300-ü göstərilir. Tarix aralığını daralt.')
         G = G.head(300)
     for day, grp in G.groupby('date'):
         st.markdown(f'**{day:%d.%m.%Y}** · {len(grp)} oyun')
         for _, r in grp.iterrows():
-            c = st.columns([0.8, 2, 3.3, 2.6, 1.3])
-            tm = str(r['time'])
-            c[0].write(tm if (not r['played'] and len(tm) <= 5 and ':' in tm) else '')
-            c[1].caption(FD_LEAGUES.get(r['div'], r['div']))
-            sc = f" **{int(r['hg'])}:{int(r['ag'])}**" if r['played'] and pd.notna(r['hg']) else ''
-            c[2].write(f"{r['home']} — {r['away']}{sc}")
+            c = st.columns([1.0, 2, 3.2, 2.6, 1.3])
+            if pd.notna(r['hg']) and pd.notna(r['ag']):
+                ht = f"<br><span style='opacity:.6;font-size:11px'>İY {int(r['hth'])}:{int(r['hta'])}</span>" if pd.notna(r['hth']) and pd.notna(r['hta']) else ''
+                c[0].markdown(f"<b style='font-size:16px'>{int(r['hg'])}:{int(r['ag'])}</b>{ht}", unsafe_allow_html=True)
+            else:
+                tm = str(r['time'])
+                c[0].write(tm if (len(tm) <= 5 and ':' in tm) else '')
+            c[1].caption(_oh_lg(r['div']))
+            c[2].write(f"{r['home']} — {r['away']}")
             c[3].caption(' · '.join(f"{nm} {_oh_fmt(r.get(f'{book}_{s}'))}" for s, nm in OH_SLOTS))
             key = (r['div'], pd.Timestamp(r['date']).strftime('%Y-%m-%d'), r['home'], r['away'])
             c[4].button('🔍 Analiz', key='ohp_' + '|'.join(key), on_click=_oh_pick, args=(key,), use_container_width=True)
