@@ -1731,10 +1731,12 @@ def _oh_close():
     st.session_state['oh_sel'] = None
 
 
-def _oh_shift(sign):
-    a, b = st.session_state['oh_from'], st.session_state['oh_to']
-    step = timedelta(days=max((b - a).days + 1, 1) * sign)
-    st.session_state['oh_from'], st.session_state['oh_to'] = a + step, b + step
+def _oh_shift(which, delta):
+    """Yalnız bir tarixi (başlanğıc və ya son) 1 gün sürüşdürür; aralıq tərsinə düşməsin."""
+    k = 'oh_from' if which == 'f' else 'oh_to'
+    st.session_state[k] = st.session_state[k] + timedelta(days=delta)
+    if st.session_state['oh_from'] > st.session_state['oh_to']:
+        st.session_state['oh_to' if which == 'f' else 'oh_from'] = st.session_state[k]
     st.session_state['oh_sel'] = None
 
 
@@ -1849,7 +1851,7 @@ def render_odds_match_page():
         cc[6].checkbox('BTTS', value=False, disabled=True, key='oh_f_btts', help=OH_NODATA['btts'])
         o = st.columns(4)
         book = o[0].selectbox('Bukmeker', list(FDO_BOOKS), format_func=lambda k: FDO_BOOKS[k][0], key='oh_book')
-        tol = o[1].number_input('Tolerans ±%', 0.0, 50.0, 4.0, 0.5, key='oh_tol',
+        tol = o[1].number_input('Tolerans ±%', 0.0, 50.0, 4.0, 0.5, key='oh_tol', format='%.1f',
                                 help='Koef. 2.00, tolerans 4% olsa, 1.92–2.08 arası koeffisientli oyunlar eyni sayılır.') / 100
         years = int(o[2].number_input('Son neçə il', 1, 25, 5, key='oh_years'))
         same_div = o[3].checkbox('Yalnız eyni liqa', value=False, key='oh_same_div')
@@ -1868,18 +1870,23 @@ def render_odds_match_page():
         return
 
     # ---- tarix aralığı + oxlar ----
-    d = st.columns([0.7, 2.2, 2.2, 0.7, 1.2])
-    d[0].button('◀', on_click=_oh_shift, args=(-1,), use_container_width=True, key='oh_prev', help='Əvvəlki gün(lər)')
+    d = st.columns([0.55, 2, 0.55, 0.25, 0.55, 2, 0.55, 1.1])
+    d[0].button('◀', on_click=_oh_shift, args=('f', -1), use_container_width=True, key='oh_f_prev', help='Başlanğıc tarixi 1 gün geri')
     d[1].date_input('Başlanğıc', key='oh_from')
-    d[2].date_input('Son', key='oh_to')
-    d[3].button('▶', on_click=_oh_shift, args=(1,), use_container_width=True, key='oh_next', help='Sonrakı gün(lər)')
-    d[4].button('Bu gün', on_click=_oh_today, use_container_width=True, key='oh_today')
+    d[2].button('▶', on_click=_oh_shift, args=('f', 1), use_container_width=True, key='oh_f_next', help='Başlanğıc tarixi 1 gün irəli')
+    d[4].button('◀', on_click=_oh_shift, args=('t', -1), use_container_width=True, key='oh_t_prev', help='Son tarixi 1 gün geri')
+    d[5].date_input('Son', key='oh_to')
+    d[6].button('▶', on_click=_oh_shift, args=('t', 1), use_container_width=True, key='oh_t_next', help='Son tarixi 1 gün irəli')
+    d[7].button('Bu gün', on_click=_oh_today, use_container_width=True, key='oh_today')
     d_from, d_to = st.session_state['oh_from'], st.session_state['oh_to']
     if d_from > d_to:
         st.warning('Başlanğıc tarixi son tarixdən böyük ola bilməz.')
         return
 
     G = _oh_games(hist, fix, d_from, d_to)
+    if fix is not None and not fix.empty:
+        st.caption(f"Koeffisienti olan qarşıdakı oyunlar (fixtures.csv): cəmi {len(fix)}, tarixlər {fix['date'].min():%d.%m.%Y} – {fix['date'].max():%d.%m.%Y}. "
+                   f"Seçilmiş aralıqda: {len(G)} oyun. Yalnız football-data.co.uk-un əsas liqaları var; qitə kubokları və digər liqaların koeffisienti bu mənbədə yoxdur.")
     sel = st.session_state.get('oh_sel')
     if sel:
         hit = G[(G['div'] == sel[0]) & (G['date'] == pd.Timestamp(sel[1])) & (G['home'] == sel[2]) & (G['away'] == sel[3])]
