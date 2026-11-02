@@ -1883,26 +1883,26 @@ def _oh_scan(grp, hist, book, use, tol, same_div, years, thr, minn):
             rows.append({'Oyun': f"{r['home']} — {r['away']}", 'Liqa': _oh_lg(r['div']), 'Nəticə': lbl,
                          'Faiz': round(100 * k / n, 1), 'Keçmişdə': f'{k}/{n}',
                          'Bukmeker': _fdo_implied(lbl, g) if lbl in ('1', 'X', '2', 'Üst 2.5', 'Alt 2.5') else None,
-                         'Real': real, '_n': n})
+                         'Real': real, '_n': n, '_key': (r['div'], r['date'], r['home'], r['away'])})
     return rows, skipped
 
 
-def _oh_scan_show(grp, hist, book, use, tol, same_div, years, thr, minn):
+def _oh_scan_show(rows, skipped, thr, minn, tol, years, n_games):
     with st.container(border=True):
-        with st.spinner('Günün oyunları yoxlanılır...'):
-            rows, skipped = _oh_scan(grp, hist, book, use, tol, same_div, years, thr, minn)
-        st.markdown(f'**Keçmişdə {thr:g}%+ gələnlər** (ən azı {minn} oxşar oyun, son {years} il, tolerans ±{tol * 100:.1f}%)')
+        n_ok = len({x['_key'] for x in rows})
+        st.markdown(f'**Keçmişdə {thr:g}%+ gələnlər** (ən azı {minn} oxşar oyun, son {years} il, tolerans ±{tol * 100:.1f}%) · '
+                    f'uyğun gələn oyun: **{n_ok} / {n_games}**')
         if not rows:
-            st.info('Bu şərtlərə uyğun nəticə tapılmadı. Faizi və ya minimum oyun sayını azalt, ya da toleransı artır.')
+            st.info('Bu şərtlərə uyğun nəticə tapılmadı. Faizi və ya minimum oyun sayını azalt, toleransı artır, ya da koeffisient filtrlərinin sayını azalt.')
         else:
-            D = pd.DataFrame(rows).sort_values(['Faiz', '_n'], ascending=False).drop(columns='_n')
+            D = pd.DataFrame(rows).sort_values(['Faiz', '_n'], ascending=False).drop(columns=['_n', '_key'])
             D['Bukmeker'] = D['Bukmeker'].map(lambda v: f'{v:.0f}%' if pd.notna(v) else '—')
             st.dataframe(D, hide_index=True, use_container_width=True,
                          column_config={'Faiz': st.column_config.NumberColumn('Faiz', format='%.1f%%')})
             real = D['Real'].value_counts()
             if real.sum():
-                st.caption(f"Bitmiş oyunlarda real yoxlama: ✅ {int(real.get('✅', 0))} gəlib, ❌ {int(real.get('❌', 0))} gəlməyib. "
-                           'Oyuna basıb ətraflı baxa bilərsiniz.')
+                st.caption(f"Bitmiş oyunlarda real yoxlama: ✅ {int(real.get('✅', 0))} gəlib, ❌ {int(real.get('❌', 0))} gəlməyib.")
+            st.caption('Aşağıda yalnız şərtə uyğun gələn oyunlar qalıb. Ətraflı baxmaq üçün 🔍 Analiz.')
         if skipped:
             st.caption(f'Koeffisienti olmayan və ya oxşar keçmiş oyunu tapılmayan oyun: {skipped}.')
         st.caption('Bu, keçmiş statistikadır, gələcək nəticəyə zəmanət deyil. Kiçik nümunədə 100% təsadüfi ola bilər.')
@@ -2044,11 +2044,6 @@ def render_odds_match_page():
                                 help='Koef. 2.00, tolerans 4% olsa, 1.92–2.08 arası koeffisientli oyunlar eyni sayılır.') / 100
         years = int(o[2].number_input('Son neçə il', 1, 25, 5, key='oh_years'))
         same_div = o[3].checkbox('Yalnız eyni liqa', value=False, key='oh_same_div')
-        o2 = st.columns(4)
-        thr = float(o2[0].number_input('Günün oyunları üçün min. faiz', 1.0, 100.0, 100.0, 1.0, format='%.0f', key='oh_thr',
-                                       help='Siyahıdakı "🎯" düyməsi: keçmişdə oxşar koeffisientli oyunlarda bu faiz və ya daha çox gələn nəticələri tapır.'))
-        minn = int(o2[1].number_input('Min. oxşar oyun sayı', 1, 500, 5, key='oh_minn',
-                                      help='Bundan az oxşar oyun olan nəticələr nəzərə alınmır (kiçik nümunədə 100% təsadüfi olur).'))
         need = pd.Timestamp(baku_today()) - pd.DateOffset(years=years)
         have = hist['date'].min()
         st.caption(f'Bazada keçmiş oyun: {len(hist):,}'.replace(',', ' ') + f' · ən köhnə tarix: {have:%d.%m.%Y}')
@@ -2139,6 +2134,11 @@ def render_odds_match_page():
     if len(G) > 300:
         st.warning(f'{len(G)} oyun var, ilk 300-ü göstərilir. Tarix aralığını daralt.')
         G = G.head(300)
+    _tc = st.columns([2, 2, 4])
+    thr = float(_tc[0].number_input('🎯 Min. faiz (%)', 1.0, 100.0, 100.0, 5.0, format='%.0f', key='oh_thr',
+                                    help='◀ − / + ▶ ilə 5-5 azalt/artır, ya da birbaşa yaz (məs. 87). Düymə: keçmişdə oxşar koeffisientli oyunlarda bu faiz və ya daha çox gələn nəticələri tapır.'))
+    minn = int(_tc[1].number_input('Min. oxşar oyun sayı', 1, 500, 5, key='oh_minn',
+                                   help='Bundan az oxşar oyun olan nəticələr nəzərə alınmır (kiçik nümunədə 100% təsadüfi olur).'))
     for day, grp in G.groupby('date'):
         _dk = f'{day:%Y-%m-%d}'
         _hh = st.columns([5, 2])
@@ -2147,7 +2147,11 @@ def render_odds_match_page():
         _hh[1].button('✖ Bağla' if _on else f'🎯 {thr:g}% olanları tap', key='ohs_' + _dk, on_click=_oh_toggle_scan, args=(_dk,),
                       use_container_width=True, type='primary' if _on else 'secondary')
         if _on:
-            _oh_scan_show(grp, hist, book, use, tol, same_div, years, thr, minn)
+            with st.spinner('Günün oyunları yoxlanılır...'):
+                _rows, _skip = _oh_scan(grp, hist, book, use, tol, same_div, years, thr, minn)
+            _oh_scan_show(_rows, _skip, thr, minn, tol, years, len(grp))
+            _ks = {x['_key'] for x in _rows}
+            grp = grp[[(a_, b_, c_, d_) in _ks for a_, b_, c_, d_ in zip(grp['div'], grp['date'], grp['home'], grp['away'])]]
         for _, r in grp.iterrows():
             c = st.columns([1.0, 2, 3.2, 2.6, 1.3])
             if pd.notna(r['hg']) and pd.notna(r['ag']):
